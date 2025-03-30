@@ -19,10 +19,10 @@ agent_cfg = config["agent"]
 training_cfg = config["training"]
 
 # Get list of seeds (default to [0] if not specified)
-seeds = config.get("seeds", [0])
+seeds = config.get("seeds", [0])  # Example: multiple seeds for parallel runs
 
 # Root directory for all runs
-runs_dir = "Runs"
+runs_dir = "runs"
 if not os.path.exists(runs_dir):
     os.makedirs(runs_dir)
 

@@ -8,7 +8,7 @@ env:
 
 agent:
   lr: 0.0001
-  max_action: 1.0
+  max_action: 10.0
   batch_size: 100
   replay_buffer_max_size: 500000
   gamma: 0.99
@@ -20,7 +20,7 @@ agent:
   exploration_noise: 0.1
 
 training:
-  episodes: 10000
+  episodes: 50000
   start_timesteps: 200
-  save_freq: 1000
+  save_freq: 5000
   save_dir: "models/"
