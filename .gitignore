@@ -1,0 +1,79 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# ROS build and log files
+build/
+devel/
+log/
+
+# Python virtualenv pip tools
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Distribution / packaging
+dist/
+*.egg-info/
+.eggs/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyTorch checkpoints / model weights
+*.pth
+*.pt
+
+# Environment config files
+.env
+.env.*
+
+# OS / IDE specific
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# CMake and catkin tools
+CMakeFiles/
+CMakeCache.txt
+catkin_generated/
+catkin_tools_prebuild/
+
+# Test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+coverage.xml
+*.cover
+*.py,cover
+.cache
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# Ignore data outputs
+*.csv
+*.npy
+*.npz
+*.pkl
+*.h5
+
+# Ignore custom output folders
+output/
+results/
+runs/
+checkpoints/
+Runs/
+models/
+# Ignore mypy and pylint cache
+.mypy_cache/
+.pytest_cache/
