@@ -13,7 +13,7 @@ class Actor(nn.Module):
         
         self.l1 = nn.Linear(state_dim, 400)
         self.l2 = nn.Linear(400, 300)
-        self.l3 = nn.Linear(300, action_dim) 
+        self.l3 = nn.Linear(300, 2) 
         self.head = nn.Linear(300, 1)
         
         self.max_action = max_action
@@ -21,10 +21,23 @@ class Actor(nn.Module):
     def forward(self, state):
         a = F.relu(self.l1(state))
         a = F.relu(self.l2(a))
-        action_scale = F.sigmoid(self.head(a))
-        a = torch.nn.functional.normalize(torch.tanh(self.l3(a))) * self.max_action *action_scale
+
+        # Direction head output
+        direction = torch.tanh(self.l3(a))
+        direction = torch.nn.functional.normalize(direction, dim=1)
+        
+        # Scale head output
+        scale = F.sigmoid(self.head(a))
+        
+        # Combine for output as [dir_x, dir_y, scale]
+        action = torch.cat([direction, scale], dim=1)
+        
+        return action
+
+        # action_scale = F.sigmoid(self.head(a))
+        # a = torch.nn.functional.normalize(torch.tanh(self.l3(a))) * self.max_action *action_scale
         # a = 
-        return a
+        # return a
         
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim):

@@ -1,14 +1,14 @@
 env:
   gui: false
-  max_force: 10.0
+  max_force: 300.0
   friction: 0.5
   goal_pos: [2.0, 0.0]
   goal_thresh: 0.1
-  max_steps: 200
+  max_steps: 2000
 
 agent:
   lr: 0.0001
-  max_action: 10.0
+  max_action: 1.0
   batch_size: 100
   replay_buffer_max_size: 500000
   gamma: 0.99

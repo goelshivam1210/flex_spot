@@ -28,8 +28,8 @@ class PrismaticEnv(gym.Env):
       A dense reward based on the effective displacement in the direction of
       the applied force, with an additional large reward when the box reaches the goal.
     """
-    def __init__(self, gui=False, max_force=10.0, friction=0.5, 
-                 goal_pos=np.array([2.0, 0.0]), goal_thresh=0.1, max_steps=200):
+    def __init__(self, gui=False, max_force=200.0, friction=0.5, 
+                 goal_pos=np.array([2.0, 0.0]), goal_thresh=0.1, max_steps=2000):
         super(PrismaticEnv, self).__init__()
         self.gui = gui
         self.max_force = max_force       # η: maximum force
@@ -125,6 +125,8 @@ class PrismaticEnv(gym.Env):
         if np.linalg.norm(current_pos - self.goal_pos) < self.goal_thresh:
             reward += 100  # large reward on reaching the goal
             done = True
+            print (f"Goal reached at step {self.steps} with displacement {displacement}.")
+            # time.sleep(2)
         if self.steps >= self.max_steps:
             done = True
 
@@ -141,12 +143,21 @@ class PrismaticEnv(gym.Env):
 # For quick manual testing of the gym environment with keyboard controls.
 if __name__ == '__main__':
     env = PrismaticEnv(gui=True)
-    obs = env.reset()
+    obs, _ = env.reset()  # unpack observation and info
     print("Initial observation:", obs)
     try:
         while True:
             keys = p.getKeyboardEvents()
-            action = np.array([0.0, 0.0, 1.0])  # default: full force scale (1.0)
+            
+            # If no arrow key is pressed, just print the observation and sleep.
+            if not (p.B3G_LEFT_ARROW in keys or p.B3G_RIGHT_ARROW in keys or 
+                    p.B3G_UP_ARROW in keys or p.B3G_DOWN_ARROW in keys):
+                print("No arrow key pressed. Current observation:", obs)
+                time.sleep(0.1)
+                continue
+
+            # Set default action: zero force direction, with force scale set high (which will be clipped)
+            action = np.array([0.0, 0.0, 200.0])
             if p.B3G_LEFT_ARROW in keys and keys[p.B3G_LEFT_ARROW] & p.KEY_IS_DOWN:
                 action[0] = -1.0
             if p.B3G_RIGHT_ARROW in keys and keys[p.B3G_RIGHT_ARROW] & p.KEY_IS_DOWN:
@@ -159,9 +170,9 @@ if __name__ == '__main__':
             if 27 in keys and keys[27] & p.KEY_WAS_TRIGGERED:
                 break
 
-            obs, reward, done, _ = env.step(action)
-            print("Obs:", obs, "Reward:", reward, "Done:", done)
+            obs, reward, done, _, _ = env.step(action)
+            print("Action:", action, "Obs:", obs, "Reward:", reward, "Done:", done)
             if done:
-                obs = env.reset()
+                obs, _ = env.reset()
     finally:
         env.close()

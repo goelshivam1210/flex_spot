@@ -19,7 +19,7 @@ agent_cfg = config["agent"]
 training_cfg = config["training"]
 
 # Get list of seeds (default to [0] if not specified)
-seeds = config.get("seeds", [0])  # Example: multiple seeds for parallel runs
+seeds = config.get("seeds", [2])  # Example: multiple seeds for parallel runs
 
 # Root directory for all runs
 runs_dir = "runs"
@@ -50,7 +50,7 @@ for seed in seeds:
     # Create the environment (single instance)
     env = PrismaticEnv(
         gui=env_cfg.get("gui", False),
-        max_force=env_cfg.get("max_force", 10.0),
+        max_force=env_cfg.get("max_force", 20.0),
         friction=env_cfg.get("friction", 0.5),
         goal_pos=np.array(env_cfg.get("goal_pos", [2.0, 0.0])),
         goal_thresh=env_cfg.get("goal_thresh", 0.1),
@@ -70,7 +70,7 @@ for seed in seeds:
 
     # Training parameters
     episodes = training_cfg.get("episodes", 1000)
-    start_timesteps = training_cfg.get("start_timesteps", 1000)
+    start_timesteps = training_cfg.get("start_timesteps", 200)
     batch_size = agent_cfg.get("batch_size", 100)
     gamma = agent_cfg.get("gamma", 0.99)
     polyak = agent_cfg.get("polyak", 0.995)
