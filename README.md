@@ -27,3 +27,15 @@ export BOSDYN_CLIENT_PASSWORD=hrilabrulesspotphi
 ```bash
 python spot_tensorflow_detector.py --model-path /home/shivam/spot/spot_flex_novelty/code/models/faster_rcnn_inception_v2_coco_2018_01_28/frozen_inference_graph.pb 192.168.80.3
 ```
+
+```
+        fiducial_height_and_width = 146  #mm
+```
+
+
+```bash
+
+                        choices=['frontleft', 'frontright', 'left', 'right', 'back', 'hand'])
+
+
+```
