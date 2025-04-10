@@ -573,3 +573,11 @@ if __name__ == '__main__':
 #   --policy-duration 15.0 \
 #   --target-x 0.5 \
 #   --target-y 0.3
+
+
+
+
+the code that we have has everything we need, but I would like to do it step by step.
+so lets maybe use the grasping code to let the user select a pixel in the image, and then the robot grasps it, and then we can generate the state of the object. So that we can start the policy transfer. Lets first write code do that I can tell you the dimensions of the object
+length = 27 inches width = 22 inches height = 13 inches
+so lets first generate the state so that we can use the policy, and then we will write and test code for the policy conversion to the end effector space.
