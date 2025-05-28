@@ -1,0 +1,27 @@
+# config.yaml
+env:
+  max_force: 20.0
+  friction: 0.5
+  linear_damping: 0.9
+  angular_damping: 0.9
+  goal_thresh: 0.2
+  max_steps: 800
+  gui: false
+  goal_reward: 10
+
+agent:
+  lr: 0.001
+  replay_buffer_max_size: 500000
+  batch_size: 100
+  gamma: 0.99
+  polyak: 0.995
+  policy_noise: 0.2
+  noise_clip: 0.5
+  policy_delay: 2
+  n_iter: 1
+  exploration_noise: 0.1
+
+training:
+  episodes: 10000
+  start_timesteps: 1000
+  save_freq: 1000
