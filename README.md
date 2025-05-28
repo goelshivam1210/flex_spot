@@ -1,41 +1,48 @@
+# FLEX-SPOT
 
-#### robot ip
+This repository houses the code for the flex impleemntation on the BD SPOT Robot.
+Please contact Shivam Goel (shivam.goel@tufts.edu) for any queries.
+
+- **sim/**: Simulated training environments for force policy learning using PyBullet.
+- **robot/**: Execution interface to deploy trained policies on Spot using its SDK.
+
+---
+
+## Project Structure
+
+```
+flex_spot/
+├── sim/             # PyBullet environments and TD3 training
+├── robot/           # Spot robot policy execution interface
+```
+
+---
+
+## Getting Started
+
+### 1. Train in Simulation
 
 ```bash
-192.168.80.3
+cd sim
+python train_new.py
 ```
 
-### username/password export command
+### 2. Deploy on Spot
 
 ```bash
-export BOSDYN_CLIENT_USERNAME=hrilab
+cd robot
+python control_robot.py --ip <ROBOT_IP>
 ```
 
-```bash
-export BOSDYN_CLIENT_PASSWORD=hrilabrulesspotphi
-```
+---
 
+## Requirements
 
-```bash
-/home/shivam/spot/spot_flex_novelty/code/models/faster_rcnn_inception_v2_coco_2018_01_28.tar.gz
-```
+- Python 3.8+
+- Additional dependencies listed in each directory's `requirements` file
 
-```bash
-/home/shivam/spot/spot_flex_novelty/code/models/faster_rcnn_inception_v2_coco_2018_01_28/frozen_inference_graph.pb
-```
+---
 
-```bash
-python spot_tensorflow_detector.py --model-path /home/shivam/spot/spot_flex_novelty/code/models/faster_rcnn_inception_v2_coco_2018_01_28/frozen_inference_graph.pb 192.168.80.3
-```
+## License
 
-```
-        fiducial_height_and_width = 146  #mm
-```
-
-
-```bash
-
-                        choices=['frontleft', 'frontright', 'left', 'right', 'back', 'hand'])
-
-
-```
+MIT License
