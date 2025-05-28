@@ -44,7 +44,17 @@ Replace `<ROBOT_IP>` with Spot's IP (e.g., `192.168.80.3`).
 - Ensure Spot is estopped, authenticated, and on the same network.
 - Trained policies must be accessible in this directory or passed via arguments.
 
+You need to export the following environment variables to authenticate with the Boston Dynamics API:
 
+```bash 
+export BOSDYN_CLIENT_USERNAME=hrilab
+export BOSDYN_CLIENT_PASSWORD=hrilabrulesspotphi
+```
+also make sure estop_gui is running on the robot.
+The file can be found in the SPOTSDK under `examples/estop_gui.py`.
+```bash
+python estop_gui.py --ip <ROBOT_IP>
+```
 ---
 
 ## License
