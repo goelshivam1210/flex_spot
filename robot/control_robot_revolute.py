@@ -28,25 +28,41 @@ from td3 import Actor, TD3
 g_image_click = None
 g_image_display = None
 
-def generate_arc_waypoints(start_pos, radius=0.5, start_angle=-np.pi/6, end_angle=np.pi/6, num_points=10):
+# for the ESTOP client
+def verify_estop(robot):
+    """Verify the robot is not estopped"""
+
+    client = robot.ensure_client(EstopClient.default_service_name)
+    if client.get_status().stop_level != estop_pb2.ESTOP_LEVEL_NONE:
+        error_message = 'Robot is estopped. Please use an external E-Stop client, such as the' \
+                        ' estop SDK example, to configure E-Stop.'
+        robot.logger.error(error_message)
+        raise Exception(error_message)
+
+def generate_arc_waypoints_from_gripper(start_pos, radius=0.5, start_angle=-np.pi/4, end_angle=np.pi/4, num_points=20):
     """
-    Generate waypoints along an arc path.
-    
-    Args:
-        start_pos: Starting position [x, y, z]
-        radius: Radius of the arc
-        start_angle: Starting angle in radians
-        end_angle: Ending angle in radians
-        num_points: Number of waypoints to generate
-        
-    Returns:
-        Array of waypoints [[x, y], ...]
+    Generate waypoints that start from the gripper's current position.
     """
     waypoints = []
-    for theta in np.linspace(start_angle, end_angle, num_points):
-        x = start_pos[0] + radius * np.cos(theta)
-        y = start_pos[1] + radius * np.sin(theta)
+    for i in range(num_points):
+        t = i / (num_points - 1)  # 0 to 1
+        
+        # Interpolate angle
+        angle = start_angle + t * (end_angle - start_angle)
+        
+        # Generate points along arc
+        if i == 0:
+            # First point is exactly at gripper position
+            x = start_pos[0]
+            y = start_pos[1]
+        else:
+            # Arc points
+            arc_progress = t * radius
+            x = start_pos[0] + arc_progress * np.cos(angle)
+            y = start_pos[1] + arc_progress * np.sin(angle)
+        
         waypoints.append(np.array([x, y]))
+    
     return np.array(waypoints)
 
 def find_closest_point_on_path(current_pos, waypoints):
@@ -150,18 +166,6 @@ def calculate_path_following_state(current_position, current_orientation, waypoi
     ], dtype=np.float32)
     
     return state
-
-
-
-def verify_estop(robot):
-    """Verify the robot is not estopped"""
-
-    client = robot.ensure_client(EstopClient.default_service_name)
-    if client.get_status().stop_level != estop_pb2.ESTOP_LEVEL_NONE:
-        error_message = 'Robot is estopped. Please use an external E-Stop client, such as the' \
-                        ' estop SDK example, to configure E-Stop.'
-        robot.logger.error(error_message)
-        raise Exception(error_message)
 
 def calculate_state_space(robot_state_client, box_dimensions, handle_position, handle_length):
     """Calculate the state space for policy input"""
@@ -574,7 +578,7 @@ def arm_object_grasp(config, robot, robot_state_client, image_client, command_cl
     return grasp_successful
 
 def execute_path_following_policy(robot, policy, robot_state_client, command_client, 
-                                 waypoints=None, max_steps=100, use_whole_body=True, 
+                                 waypoints=None, max_steps=200, use_whole_body=True, 
                                  movement_scale=0.05, apply_orientation=True):
     """
     Execute the path-following policy.
@@ -597,8 +601,7 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     # Generate waypoints if not provided
     if waypoints is None:
         print("Generating arc waypoints...")
-        waypoints = generate_arc_waypoints(initial_position, radius=1.5, num_points=20)
-    
+        waypoints = generate_arc_waypoints_from_gripper(initial_position[:2], radius=1.5, start_angle=-np.pi/4, end_angle=np.pi/4, num_points=20)
     print(f"Following path with {len(waypoints)} waypoints")
     
     # Run policy execution loop
@@ -614,10 +617,13 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
         
         # Calculate state for policy
         state = calculate_path_following_state(current_position, current_orientation, waypoints)
-        
+      
         # Get action from policy
         action = policy.select_action(state)
-        
+        # debugging output
+        print(f"  Closest waypoint #{closest_idx}: {waypoints[closest_idx]}")
+        print(f"  Robot thinks it should move: {action[:2]}")
+        print(f"  Actual movement will be: {-action[0]*movement_scale:.3f}, {-action[1]*movement_scale:.3f}")  
         # Extract state components for logging
         position_error = state[:2]
         orientation_error = state[2]
@@ -712,6 +718,7 @@ def run_integrated_demo(config):
             grasp_success = arm_object_grasp(
                 config, robot, robot_state_client, image_client, command_client, manipulation_api_client
             )
+            cv2.destroyAllWindows()  # Close OpenCV window after grasp
             
             # If grasp was successful and policy execution is enabled, run the policy
             if grasp_success and config.run_policy:
@@ -735,15 +742,16 @@ def run_integrated_demo(config):
                 # If only policy execution is requested (no grasp)
                 elif config.run_policy:
                     robot.logger.info('Running policy execution (without grasp)...')
-                    execute_policy(
+                    execute_path_following_policy(
                         robot, 
                         policy, 
                         robot_state_client, 
                         command_client,
-                        goal_distance=config.goal_distance,
+                        waypoints=config.waypoints,  # You can pass custom waypoints if needed
                         max_steps=config.max_steps,
                         use_whole_body=config.use_whole_body,
-                        movement_scale=config.movement_scale
+                        movement_scale=config.movement_scale,
+                        apply_orientation=config.force_top_down_grasp or config.force_horizontal_grasp
                     )
 
                     # Power off the robot if requested
@@ -781,7 +789,7 @@ def main():
                         default='/home/shivam/spot/spot_flex_novelty/code/robot/models/revolute_model')
     parser.add_argument('--policy-name', help='Name of the policy model', default='best_model')
     parser.add_argument('--goal-distance', type=float, help='Distance to goal in meters', default=2.0)
-    parser.add_argument('--max-steps', type=int, help='Maximum policy steps', default=50)
+    parser.add_argument('--max-steps', type=int, help='Maximum policy steps', default=100)
     parser.add_argument('--movement-scale', type=float, help='Scale factor for movement (meters)', default=0.05)
     parser.add_argument('--use-whole-body', action='store_true', 
                         help='Use whole-body control for policy execution', default=True)

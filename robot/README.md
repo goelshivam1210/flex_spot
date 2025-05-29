@@ -55,6 +55,13 @@ The file can be found in the SPOTSDK under `examples/estop_gui.py`.
 ```bash
 python estop_gui.py --ip <ROBOT_IP>
 ```
+
+##### In case you want to use the `tablet` to control the robot: 
+
+On the tablet you should swipe up and connect to the `spotphi` network. The credentials are same as above.
+Once you are connected,
+Then you can use the tablet to `estop` the robot, and also to control it using the `joystick`.
+
 ---
 
 ## License
