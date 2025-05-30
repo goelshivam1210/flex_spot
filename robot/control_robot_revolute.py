@@ -1,3 +1,4 @@
+import os
 import argparse
 import sys
 import time
@@ -23,6 +24,9 @@ import bosdyn.client.math_helpers as math_helpers
 
 # Import TD3 model
 from td3 import Actor, TD3
+# import DISPROD
+from disprod_path_plan import generate_waypoints_dubins, DUBINS_CAR_CONFIG_PATH
+
 
 # Global variables for image click handling
 g_image_click = None
@@ -599,10 +603,34 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     print(f"Initial gripper position: {initial_position}")
     
     # Generate waypoints if not provided
-    if waypoints is None:
-        print("Generating arc waypoints...")
-        waypoints = generate_arc_waypoints_from_gripper(initial_position[:2], radius=1.5, start_angle=0, end_angle=np.pi, num_points=20)
-    print(f"Following path with {len(waypoints)} waypoints")
+    # if waypoints is None:
+    #     print("Generating arc waypoints...")
+    #     waypoints = generate_arc_waypoints_from_gripper(initial_position[:2], radius=1.5, start_angle=0, end_angle=np.pi, num_points=20)
+    # print(f"Following path with {len(waypoints)} waypoints")
+
+    waypoints = []
+    # using disprod to generate waypoints
+    if os.path.exists(DUBINS_CAR_CONFIG_PATH):
+        waypoint_counter = 0
+        try:
+            goal_x = initial_position[0] + 1.0
+            goal_y = initial_position[1] + 0
+            for waypoint in generate_waypoints_dubins(
+                start_x = initial_position[0],
+                start_y = initial_position[1],
+                goal_x = goal_x,
+                goal_y = goal_y,
+                n_episodes=1,
+                depth=30, 
+                alg='disprod',
+                map_name='no-ob-1'
+            ):
+                waypoint_counter += 1
+                waypoints.append(waypoint[:2])  # Use only x,y for path following
+                print(f"Generated waypoint {waypoint_counter}: {waypoint}")
+            print(f"Generated {waypoint_counter} waypoints using disprod.")
+        except Exception as e:
+            print(f"Error generating waypoints with disprod: {e}")
     
     # Run policy execution loop
     step_delay = 0.5  # seconds
@@ -610,6 +638,8 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     progress_threshold = 0.95  # 95% progress to consider done
     
     print("Starting path-following policy execution...")
+
+
     for step in range(max_steps):
         # Get current gripper position and orientation
         current_position, current_orientation = get_gripper_position(robot_state_client)
