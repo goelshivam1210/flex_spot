@@ -601,7 +601,7 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     # Generate waypoints if not provided
     if waypoints is None:
         print("Generating arc waypoints...")
-        waypoints = generate_arc_waypoints_from_gripper(initial_position[:2], radius=1.5, start_angle=-np.pi/4, end_angle=np.pi/4, num_points=20)
+        waypoints = generate_arc_waypoints_from_gripper(initial_position[:2], radius=1.5, start_angle=0, end_angle=np.pi, num_points=20)
     print(f"Following path with {len(waypoints)} waypoints")
     
     # Run policy execution loop
@@ -610,7 +610,6 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     progress_threshold = 0.95  # 95% progress to consider done
     
     print("Starting path-following policy execution...")
-    
     for step in range(max_steps):
         # Get current gripper position and orientation
         current_position, current_orientation = get_gripper_position(robot_state_client)
@@ -620,10 +619,6 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
       
         # Get action from policy
         action = policy.select_action(state)
-        # debugging output
-        print(f"  Closest waypoint #{closest_idx}: {waypoints[closest_idx]}")
-        print(f"  Robot thinks it should move: {action[:2]}")
-        print(f"  Actual movement will be: {-action[0]*movement_scale:.3f}, {-action[1]*movement_scale:.3f}")  
         # Extract state components for logging
         position_error = state[:2]
         orientation_error = state[2]
@@ -789,7 +784,7 @@ def main():
                         default='/home/shivam/spot/spot_flex_novelty/code/robot/models/revolute_model')
     parser.add_argument('--policy-name', help='Name of the policy model', default='best_model')
     parser.add_argument('--goal-distance', type=float, help='Distance to goal in meters', default=2.0)
-    parser.add_argument('--max-steps', type=int, help='Maximum policy steps', default=100)
+    parser.add_argument('--max-steps', type=int, help='Maximum policy steps', default=50)
     parser.add_argument('--movement-scale', type=float, help='Scale factor for movement (meters)', default=0.05)
     parser.add_argument('--use-whole-body', action='store_true', 
                         help='Use whole-body control for policy execution', default=True)
