@@ -43,31 +43,31 @@ def verify_estop(robot):
         robot.logger.error(error_message)
         raise Exception(error_message)
 
-def generate_arc_waypoints_from_gripper(start_pos, radius=0.5, start_angle=-np.pi/4, end_angle=np.pi/4, num_points=20):
-    """
-    Generate waypoints that start from the gripper's current position.
-    """
-    waypoints = []
-    for i in range(num_points):
-        t = i / (num_points - 1)  # 0 to 1
+# def generate_arc_waypoints_from_gripper(start_pos, radius=0.5, start_angle=-np.pi/4, end_angle=np.pi/4, num_points=20):
+#     """
+#     Generate waypoints that start from the gripper's current position.
+#     """
+#     waypoints = []
+#     for i in range(num_points):
+#         t = i / (num_points - 1)  # 0 to 1
         
-        # Interpolate angle
-        angle = start_angle + t * (end_angle - start_angle)
+#         # Interpolate angle
+#         angle = start_angle + t * (end_angle - start_angle)
         
-        # Generate points along arc
-        if i == 0:
-            # First point is exactly at gripper position
-            x = start_pos[0]
-            y = start_pos[1]
-        else:
-            # Arc points
-            arc_progress = t * radius
-            x = start_pos[0] + arc_progress * np.cos(angle)
-            y = start_pos[1] + arc_progress * np.sin(angle)
+#         # Generate points along arc
+#         if i == 0:
+#             # First point is exactly at gripper position
+#             x = start_pos[0]
+#             y = start_pos[1]
+#         else:
+#             # Arc points
+#             arc_progress = t * radius
+#             x = start_pos[0] + arc_progress * np.cos(angle)
+#             y = start_pos[1] + arc_progress * np.sin(angle)
         
-        waypoints.append(np.array([x, y]))
+#         waypoints.append(np.array([x, y]))
     
-    return np.array(waypoints)
+#     return np.array(waypoints)
 
 def find_closest_point_on_path(current_pos, waypoints):
     """
@@ -423,6 +423,8 @@ def force_action_to_command(action, gripper_position, gripper_orientation,
     # Calculate movement vector - INVERTED for pulling behavior
     delta_x = force_dir[0] * force_scale * movement_scale
     delta_y = force_dir[1] * force_scale * movement_scale
+
+    # print(f"  DEBUG: Force dir: [{force_dir[0]:.3f}, {force_dir[1]:.3f}], Delta: [{delta_x:.3f}, {delta_y:.3f}]")
     
     # Calculate target position for arm
     target_arm_x = gripper_position[0] + delta_x
@@ -457,8 +459,8 @@ def force_action_to_command(action, gripper_position, gripper_orientation,
         
         # Calculate a target position for the body that's closer to the arm
         # but doesn't try to match it exactly
-        target_body_x = vision_tform_body.x + delta_x * 0.6  # Body moves at 60% of arm movement
-        target_body_y = vision_tform_body.y + delta_y * 0.6
+        target_body_x = vision_tform_body.x + (delta_x * 0.6)  # Body moves at 60% of arm movement
+        target_body_y = vision_tform_body.y + (delta_y * 0.6)
         
         # Create the body trajectory command
         body_command = RobotCommandBuilder.synchro_se2_trajectory_point_command(
@@ -613,7 +615,7 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     if os.path.exists(DUBINS_CAR_CONFIG_PATH):
         waypoint_counter = 0
         try:
-            goal_x = initial_position[0] + 1.0
+            goal_x = initial_position[0] + 2.0
             goal_y = initial_position[1] + 0
             for waypoint in generate_waypoints_dubins(
                 start_x = initial_position[0],
@@ -627,18 +629,25 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
             ):
                 waypoint_counter += 1
                 waypoints.append(waypoint[:2])  # Use only x,y for path following
-                print(f"Generated waypoint {waypoint_counter}: {waypoint}")
-            print(f"Generated {waypoint_counter} waypoints using disprod.")
+                # print(f"Generated waypoint {waypoint_counter}: {waypoint}")
+            # print(f"Generated {waypoint_counter} waypoints using disprod.")
         except Exception as e:
             print(f"Error generating waypoints with disprod: {e}")
-    
+    # convert the waypoints to a numpy array
+    waypoints = np.array(waypoints, dtype=np.float32)
+
+    # Mirror the Dubins-generated X coordinates about the starting X (X0)
+    X0= initial_position[0]
+    waypoints[:, 0] = 2*X0 - waypoints[:, 0]    
+    print (f"Waypoints after mirroring: {waypoints}")
+
     # Run policy execution loop
     step_delay = 0.5  # seconds
     goal_threshold = 0.2  # 20cm threshold for completion
     progress_threshold = 0.95  # 95% progress to consider done
     
+    print("Waypoints (first two):", waypoints[0], waypoints[1])
     print("Starting path-following policy execution...")
-
 
     for step in range(max_steps):
         # Get current gripper position and orientation
@@ -665,6 +674,16 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
         
         # Get desired orientation for current path position
         _, closest_idx, _ = find_closest_point_on_path(current_position[:2], waypoints)
+        
+        # dist0 = np.linalg.norm(current_position[:2] - waypoints[0])
+        # dist1 = np.linalg.norm(current_position[:2] - waypoints[1])
+        # print(f"Step {step}: pos={current_position[:2]}, "
+        #       f"err=[{state[0]:.3f},{state[1]:.3f}], yaw_err={state[2]:.3f}, "
+        #       f"prog={state[3]:.3f}, dev={state[4]:.3f}")
+        # print(f"  DEBUG: closest_idx={closest_idx}, "
+            #   f"dist_to_wpt0={dist0:.3f}, dist_to_wpt1={dist1:.3f}")
+        # print(f"  DEBUG: action_dir=[{action[0]:.3f},{action[1]:.3f}], scale={action[2]:.3f}")
+
         desired_yaw = calculate_path_tangent(waypoints, closest_idx) if apply_orientation else None
         
         # Convert action to robot command
@@ -684,8 +703,10 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
         command_client.robot_command(cmd, end_time_secs=end_time_secs)
         
         # Check if goal reached
+        progress = state[3]
+        deviation = state[4]
         if progress > progress_threshold and deviation < goal_threshold:
-            print(f"Path following completed! Progress: {progress:.3f}, Deviation: {deviation:.3f}")
+            print(f"Path following completed! Progress={progress:.3f}, Deviation={deviation:.3f}")
             break
         
         # Wait before next step
@@ -814,7 +835,7 @@ def main():
                         default='/home/shivam/spot/spot_flex_novelty/code/robot/models/revolute_model')
     parser.add_argument('--policy-name', help='Name of the policy model', default='best_model')
     parser.add_argument('--goal-distance', type=float, help='Distance to goal in meters', default=2.0)
-    parser.add_argument('--max-steps', type=int, help='Maximum policy steps', default=50)
+    parser.add_argument('--max-steps', type=int, help='Maximum policy steps', default=100)
     parser.add_argument('--movement-scale', type=float, help='Scale factor for movement (meters)', default=0.05)
     parser.add_argument('--use-whole-body', action='store_true', 
                         help='Use whole-body control for policy execution', default=True)
