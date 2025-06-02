@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import cv2
 from scipy.spatial.transform import Rotation
+# import matplotlib.pyplot as plt
 
 import bosdyn.client
 import bosdyn.client.lease
@@ -32,6 +33,13 @@ from disprod_path_plan import generate_waypoints_dubins, DUBINS_CAR_CONFIG_PATH
 g_image_click = None
 g_image_display = None
 
+# After init_visualization(), these four will be set once and used every update:
+viz_background = None     # The static image (waypoints + start point)
+viz_scale = None          # pixels per meter
+viz_x_offset = None       # translation in pixels so that x_min maps to left margin
+viz_y_offset = None       # translation in pixels so that y_min maps to bottom margin
+viz_canvas_size = None    # integer, e.g. 500 (px)
+
 # for the ESTOP client
 def verify_estop(robot):
     """Verify the robot is not estopped"""
@@ -42,6 +50,101 @@ def verify_estop(robot):
                         ' estop SDK example, to configure E-Stop.'
         robot.logger.error(error_message)
         raise Exception(error_message)
+
+def world_to_pixel(xy, scale, x_offset, y_offset, canvas_size):
+    """Convert a world‐coordinate (x, y) in meters to a pixel (px, py)."""
+    x_w, y_w = xy
+    # X → right; Y → up. We want (0,0) in world to appear near the bottom-left of the image.
+    px = int((x_w * scale) + x_offset)
+    # Flip Y so that larger Y is “up” on the screen:
+    py = int(canvas_size - ((y_w * scale) + y_offset))
+    return (px, py)
+
+def init_visualization(waypoints, padding=0.2, canvas_size=500):
+    """
+    Create a static background image showing:
+      • the mirrored waypoints as a yellow polyline
+      • a blue circle at the first waypoint (start)
+    and store scale/offset so we can overlay the current robot pose on each step.
+
+    After calling this, the window "DiSProD Viz" will appear at once.
+    """
+    global viz_background, viz_scale, viz_x_offset, viz_y_offset, viz_canvas_size
+
+    # Compute bounding box of all waypoints, then expand by 'padding' meters:
+    xs = waypoints[:, 0]
+    ys = waypoints[:, 1]
+    x_min, x_max = xs.min() - padding, xs.max() + padding
+    y_min, y_max = ys.min() - padding, ys.max() + padding
+
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    max_range = max(x_range, y_range)
+
+    # Decide pixel‐margin and scale:
+    margin = int(0.05 * canvas_size)  # 5% of image width as margin
+    usable = canvas_size - 2 * margin
+    scale = usable / max_range
+
+    # Compute offsets so that (x_min,y_min) maps to roughly (margin, margin from bottom):
+    x_offset = margin - int(x_min * scale)
+    y_offset = margin - int(y_min * scale)
+
+    # Create a blank BGR image:
+    background = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+
+    # Draw the Dubins curve (yellow polyline) segment by segment:
+    for i in range(len(waypoints) - 1):
+        p_w0 = waypoints[i]
+        p_w1 = waypoints[i + 1]
+        p_px = world_to_pixel(p_w0, scale, x_offset, y_offset, canvas_size)
+        p_py = world_to_pixel(p_w1, scale, x_offset, y_offset, canvas_size)
+        cv2.line(background, p_px, p_py, (0, 235, 255), thickness=2)  # BGR = (0,235,255) is yellow-ish
+
+    # Draw the start point (first waypoint) as a filled blue circle:
+    start_px = world_to_pixel(waypoints[0], scale, x_offset, y_offset, canvas_size)
+    cv2.circle(background, start_px, radius=6, color=(255, 0, 0), thickness=-1)  # Blue dot
+
+    # Store globals and show the window once:
+    viz_background = background
+    viz_scale = scale
+    viz_x_offset = x_offset
+    viz_y_offset = y_offset
+    viz_canvas_size = canvas_size
+
+    cv2.namedWindow('DiSProD Viz', cv2.WINDOW_NORMAL)
+    cv2.imshow('DiSProD Viz', viz_background)
+    cv2.waitKey(1)  # Just 1 ms to force a draw
+
+
+def update_visualization(current_xy, yaw=None):
+    """
+    Overlay the current gripper position (red square) and yaw arrow (green) on top of viz_background.
+    Call this once per policy step to refresh the window.
+    """
+    global viz_background, viz_scale, viz_x_offset, viz_y_offset, viz_canvas_size
+
+    if viz_background is None:
+        return  # Nothing to do if visualization was never initialized
+
+    frame = viz_background.copy()
+
+    # Draw a filled red square at current_xy:
+    px, py = world_to_pixel(current_xy, viz_scale, viz_x_offset, viz_y_offset, viz_canvas_size)
+    cv2.rectangle(frame, (px - 5, py - 5), (px + 5, py + 5), (0, 0, 255), thickness=-1)
+
+    # If yaw is given, draw a small green arrow of length ~15 px:
+    if yaw is not None:
+        length = 15  # pixels
+        dx = int(length * np.cos(yaw))
+        dy = int(length * np.sin(yaw))
+        tip = (px + dx, py - dy)  # subtract dy because screen Y is inverted
+        cv2.arrowedLine(frame, (px, py), tip, (0, 255, 0), thickness=2, tipLength=0.2)
+
+    # Show the updated frame:
+    cv2.imshow('DiSProD Viz', frame)
+    cv2.waitKey(1)  # 1 ms delay is enough to refresh
+
 
 # def generate_arc_waypoints_from_gripper(start_pos, radius=0.5, start_angle=-np.pi/4, end_angle=np.pi/4, num_points=20):
 #     """
@@ -581,6 +684,7 @@ def arm_object_grasp(config, robot, robot_state_client, image_client, command_cl
         time.sleep(0.25)
 
     robot.logger.info('Finished grasp operation.')
+    # cv2.destroyWindow(image_title)
     return grasp_successful
 
 def execute_path_following_policy(robot, policy, robot_state_client, command_client, 
@@ -637,8 +741,12 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     waypoints = np.array(waypoints, dtype=np.float32)
 
     # Mirror the Dubins-generated X coordinates about the starting X (X0)
+    # this makes sure that "forward is negative X" on SPOT
     X0= initial_position[0]
     waypoints[:, 0] = 2*X0 - waypoints[:, 0]    
+
+    # visulaization of the waypoints
+    init_visualization(waypoints, padding=0.2, canvas_size=500)
     print (f"Waypoints after mirroring: {waypoints}")
 
     # Run policy execution loop
@@ -646,24 +754,33 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
     goal_threshold = 0.2  # 20cm threshold for completion
     progress_threshold = 0.95  # 95% progress to consider done
     
-    print("Waypoints (first two):", waypoints[0], waypoints[1])
+    # print("Waypoints (first two):", waypoints[0], waypoints[1])
     print("Starting path-following policy execution...")
 
     for step in range(max_steps):
         # Get current gripper position and orientation
         current_position, current_orientation = get_gripper_position(robot_state_client)
         
+        # recompute yaw from quaternion for visualization
+        quat = [current_orientation.w, current_orientation.x,
+                current_orientation.y, current_orientation.z]
+        yaw = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz')[2]
+
+        # b) Update the visualization with the new gripper position + yaw
+        update_visualization(current_position[:2], yaw)
+        cv2.waitKey(1)  # to refresh DiSProD Viz
+        
         # Calculate state for policy
         state = calculate_path_following_state(current_position, current_orientation, waypoints)
       
         # Get action from policy
         action = policy.select_action(state)
+
         # Extract state components for logging
         position_error = state[:2]
         orientation_error = state[2]
         progress = state[3]
         deviation = state[4]
-        
         # Log state and action
         print(f"Step {step}:")
         print(f"  Position: {current_position[:2]}")
@@ -674,16 +791,7 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
         
         # Get desired orientation for current path position
         _, closest_idx, _ = find_closest_point_on_path(current_position[:2], waypoints)
-        
-        # dist0 = np.linalg.norm(current_position[:2] - waypoints[0])
-        # dist1 = np.linalg.norm(current_position[:2] - waypoints[1])
-        # print(f"Step {step}: pos={current_position[:2]}, "
-        #       f"err=[{state[0]:.3f},{state[1]:.3f}], yaw_err={state[2]:.3f}, "
-        #       f"prog={state[3]:.3f}, dev={state[4]:.3f}")
-        # print(f"  DEBUG: closest_idx={closest_idx}, "
-            #   f"dist_to_wpt0={dist0:.3f}, dist_to_wpt1={dist1:.3f}")
-        # print(f"  DEBUG: action_dir=[{action[0]:.3f},{action[1]:.3f}], scale={action[2]:.3f}")
-
+        # Calculate desired yaw based on path tangent
         desired_yaw = calculate_path_tangent(waypoints, closest_idx) if apply_orientation else None
         
         # Convert action to robot command
@@ -713,6 +821,7 @@ def execute_path_following_policy(robot, policy, robot_state_client, command_cli
         time.sleep(step_delay)
     
     print("Path-following policy execution completed.")
+    # cv2.destroyAllWindows('DiSProD Viz')  # Close visualization window
 
 def run_integrated_demo(config):
     """
@@ -764,8 +873,7 @@ def run_integrated_demo(config):
             grasp_success = arm_object_grasp(
                 config, robot, robot_state_client, image_client, command_client, manipulation_api_client
             )
-            cv2.destroyAllWindows()  # Close OpenCV window after grasp
-            
+            # cv2.destroyAllWindows('Click to grasp')  # Close OpenCV window after grasp
             # If grasp was successful and policy execution is enabled, run the policy
             if grasp_success and config.run_policy:
                 robot.logger.info('Proceeding to policy execution...')
