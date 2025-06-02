@@ -92,7 +92,8 @@ def init_visualization(waypoints, padding=0.2, canvas_size=500):
 
     # Create a blank BGR image:
     background = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
-
+    background.fill(30)  # Dark gray background
+    
     # Draw the Dubins curve (yellow polyline) segment by segment:
     for i in range(len(waypoints) - 1):
         p_w0 = waypoints[i]
@@ -104,6 +105,21 @@ def init_visualization(waypoints, padding=0.2, canvas_size=500):
     # Draw the start point (first waypoint) as a filled blue circle:
     start_px = world_to_pixel(waypoints[0], scale, x_offset, y_offset, canvas_size)
     cv2.circle(background, start_px, radius=6, color=(255, 0, 0), thickness=-1)  # Blue dot
+
+    # Draw a legend in the top-left:
+    cv2.rectangle(background, (10, 10), (200,  90), (30, 30, 30), -1)  # dark gray box
+    # Blue circle + “Start”
+    cv2.circle(background, (20, 25), 6, (255, 0, 0), -1)
+    cv2.putText(background, "Start", (35, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    # Yellow line + “Waypoints”
+    cv2.line(background, (15,  50), (25,  50), (0, 235, 255), 2)
+    cv2.putText(background, "Waypoints", (35,  50 + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    # Red square + “Current”
+    cv2.rectangle(background, (15,  70), (25,  80), (0, 0, 255), -1)
+    cv2.putText(background, "Current", (35,  80 + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
     # Store globals and show the window once:
     viz_background = background
