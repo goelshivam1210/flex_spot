@@ -1,6 +1,7 @@
 import argparse
 import sys
 import time
+import bosdyn.client.frame_helpers
 import numpy as np
 import torch
 import cv2
@@ -11,9 +12,9 @@ import bosdyn.client.lease
 import bosdyn.client.util
 import bosdyn.client.estop
 from bosdyn.api import geometry_pb2, image_pb2, manipulation_api_pb2, estop_pb2
-from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
+from bosdyn.api.spot import robot_command_pb2
 from bosdyn.client.estop import EstopClient
-from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, get_a_tform_b
+from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, VISION_FRAME_NAME, ODOM_FRAME_NAME, BODY_FRAME_NAME, HAND_FRAME_NAME, get_vision_tform_body, get_a_tform_b
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient, blocking_stand
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
@@ -27,6 +28,8 @@ from td3 import Actor, TD3
 # Global variables for image click handling
 g_image_click = None
 g_image_display = None
+
+
 
 def verify_estop(robot):
     """Verify the robot is not estopped"""
@@ -273,65 +276,131 @@ def force_action_to_command(action, gripper_position, gripper_orientation, robot
     Returns:
         Robot command
     """
-    # Parse the action
-    force_dir = np.array(action[:2])
-    force_scale = action[2]
+
+    robot_state = robot_state_client.get_robot_state()
+    transforms = robot_state.kinematic_state.transforms_snapshot
+
+    command = RobotCommandBuilder.arm_joint_freeze_command()
+
+    command = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+        1, 0, 0,
+        transforms,
+        # params=mobility_params
+        build_on_command=command
+    )
+
     
-    # Normalize force direction if not zero
-    norm = np.linalg.norm(force_dir)
-    if norm > 0:
-        force_dir = force_dir / norm
-    else:
-        force_dir = np.array([1.0, 0.0])  # Default if zero
+
+    # body_T_hand_current = get_a_tform_b(
+    #     transforms, GRAV_ALIGNED_BODY_FRAME_NAME, HAND_FRAME_NAME
+    # )
+
+    # odom_T_body = get_a_tform_b(
+    #     transforms, ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME
+    # )
+
+    # relative_move = math_helpers.SE3Pose(
+    #     x=-1,
+    #     y=0,
+    #     z=0,
+    #     rot=math_helpers.Quat()
+    # )
     
-    # Calculate movement vector - INVERTED for pulling behavior
-    delta_x = -force_dir[0] * force_scale * movement_scale
-    delta_y = -force_dir[1] * force_scale * movement_scale
+    # body_T_hand = body_T_hand_current * relative_move
+
+    # seconds = 5
+
+    # arm_command = RobotCommandBuilder.arm_pose_command_from_pose(
+    #     body_T_hand_current,
+    #     BODY_FRAME_NAME,
+    #     seconds=seconds
+    # )
+
+    # follow_arm_command = RobotCommandBuilder.follow_arm_command()
+
+    # command = RobotCommandBuilder.build_synchro_command(follow_arm_command, arm_command)
+
+    # # Parse the action
+    # force_dir = np.array(action[:2])
+    # force_scale = action[2]
     
-    # Calculate target position for arm
-    target_arm_x = gripper_position[0] + delta_x
-    target_arm_y = gripper_position[1] + delta_y
-    target_arm_z = gripper_position[2]  # Keep same height
+    # # Normalize force direction if not zero
+    # norm = np.linalg.norm(force_dir)
+    # if norm > 0:
+    #     force_dir = force_dir / norm
+    # else:
+    #     force_dir = np.array([1.0, 0.0])  # Default if zero
     
-    # Extract quaternion components
-    qw = gripper_orientation.w
-    qx = gripper_orientation.x
-    qy = gripper_orientation.y
-    qz = gripper_orientation.z
+    # # Calculate movement vector - INVERTED for pulling behavior
+    # delta_x = force_dir[0] * force_scale * movement_scale
+    # delta_y = force_dir[1] * force_scale * movement_scale
+
+    # print(f"DEBUG → pushing: force_dir=[{force_dir[0]:.3f},{force_dir[1]:.3f}], "
+    #   f"delta=[{delta_x:.3f},{delta_y:.3f}]")
     
-    if use_whole_body:
-        # Create arm pose command
-        arm_command = RobotCommandBuilder.arm_pose_command(
-            target_arm_x, target_arm_y, target_arm_z,
-            qw, qx, qy, qz, VISION_FRAME_NAME, 0.5  # 0.5 seconds duration
-        )
+    # # Calculate target position for arm
+    # target_arm_x = gripper_position[0] + delta_x
+    # target_arm_y = gripper_position[1] + delta_y
+    # target_arm_z = gripper_position[2]  # Keep same height
+    
+    # # Extract quaternion components
+    # qw = gripper_orientation.w
+    # qx = gripper_orientation.x
+    # qy = gripper_orientation.y
+    # qz = gripper_orientation.z
+    
+    # if use_whole_body:
+    #     # Create arm pose command
+    #     target_gripper_pose_in_odom = SE3Pose(
+    #         position=geometry_pb2.Vec3(
+    #             x=target_arm_x, 
+    #             y=target_arm_y, 
+    #             z=target_arm_z
+    #         ),
+    #         rotation=
+
+
+    #     arm_command = RobotCommandBuilder.arm_pose_command(
+    #         target_arm_x, target_arm_y, target_arm_z,
+    #         qw, qx, qy, qz, "odom", 0.5  # 0.5 seconds duration
+    #     )
         
-        # Let's try a simpler approach: create a trajectory point command for the body
-        # Get current robot body position in vision frame
-        robot_state = robot_state_client.get_robot_state()
-        vision_tform_body = get_vision_tform_body(robot_state.kinematic_state.transforms_snapshot)
+    #     # Let's try a simpler approach: create a trajectory point command for the body
+    #     # Get current robot body position in vision frame
+    #     robot_state = robot_state_client.get_robot_state()
+    #     vision_tform_body = get_vision_tform_body(robot_state.kinematic_state.transforms_snapshot)
+
+    #     print(f"   [DBG]  BODY (vision): x={vision_tform_body.x:.3f}, y={vision_tform_body.y:.3f}, yaw={vision_tform_body.rot.to_yaw()*180/np.pi: .1f}°")
         
-        # Calculate a target position for the body that's closer to the arm
-        # but doesn't try to match it exactly
-        target_body_x = vision_tform_body.x + delta_x * 0.6  # Body moves at 60% of arm movement
-        target_body_y = vision_tform_body.y + delta_y * 0.6
+    #     # Calculate a target position for the body that's closer to the arm
+    #     # but doesn't try to match it exactly
+    #     target_body_x = vision_tform_body.x + (delta_x * 0.6)  # Body moves at 60% of arm movement
+    #     target_body_y = vision_tform_body.y + (delta_y * 0.6)
+          
+    #     mobility_params = robot_command_pb2.MobilityParams(
+    #     obstacle_params=robot_command_pb2.ObstacleParams(
+    #         disable_vision_body_obstacle_avoidance=True,
+    #         obstacle_avoidance_padding = 0.0
+    #     ))
+    #     # Create the body trajectory command
+    #     # body_command = RobotCommandBuilder.synchro_se2_trajectory_point_command(
+    #     #     goal_x=target_body_x,
+    #     #     goal_y=target_body_y,
+    #     #     goal_heading=vision_tform_body.rot.to_yaw(),  # Maintain current heading
+    #     #     frame_name=VISION_FRAME_NAME, 
+    #     #     params=mobility_params
+    #     # )
+
+    #     body_command = RobotCommandBuilder.follow_arm_command(mobility_params)
         
-        # Create the body trajectory command
-        body_command = RobotCommandBuilder.synchro_se2_trajectory_point_command(
-            goal_x=target_body_x,
-            goal_y=target_body_y,
-            goal_heading=vision_tform_body.rot.to_yaw(),  # Maintain current heading
-            frame_name=VISION_FRAME_NAME
-        )
-        
-        # Combine into a synchronized command
-        command = RobotCommandBuilder.build_synchro_command(body_command, arm_command)
-    else:
-        # Use only the arm (original behavior)
-        command = RobotCommandBuilder.arm_pose_command(
-            target_arm_x, target_arm_y, target_arm_z,
-            qw, qx, qy, qz, VISION_FRAME_NAME, 0.5
-        )
+    #     # Combine into a synchronized command
+    #     command = RobotCommandBuilder.build_synchro_command(body_command, arm_command)
+    # else:
+    #     # Use only the arm (original behavior)
+    #     command = RobotCommandBuilder.arm_pose_command(
+    #         target_arm_x, target_arm_y, target_arm_z,
+    #         qw, qx, qy, qz, VISION_FRAME_NAME, 0.5
+    #     )
     
     return command
 
@@ -508,7 +577,7 @@ def execute_policy(robot, policy, robot_state_client, command_client, goal_dista
             use_whole_body=use_whole_body
         )
         # Set end time for command execution
-        end_time_secs = time.time() + 0.5  # Half second for command execution
+        end_time_secs = time.time() + 5  # Half second for command execution
         command_client.robot_command(cmd, end_time_secs=end_time_secs)
         
         # Check if goal reached
@@ -520,7 +589,7 @@ def execute_policy(robot, policy, robot_state_client, command_client, goal_dista
             break
         
         # Wait before next step
-        time.sleep(step_delay)
+        time.sleep(5)
     
     print("Policy execution completed.")
 
@@ -585,7 +654,7 @@ def run_integrated_demo(config):
                     robot_state_client, 
                     command_client,
                     goal_distance=config.goal_distance,
-                    max_steps=config.max_steps,
+                    max_steps=2,
                     use_whole_body=config.use_whole_body,
                     movement_scale=config.movement_scale
                 )
@@ -604,7 +673,7 @@ def run_integrated_demo(config):
                         goal_distance=config.goal_distance,
                         max_steps=config.max_steps,
                         use_whole_body=config.use_whole_body,
-                        movement_scale=config.movement_scale
+                        movement_scale=config.movement_scale,
                     )
 
                     # Power off the robot if requested
