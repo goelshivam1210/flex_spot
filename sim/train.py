@@ -5,7 +5,7 @@ import yaml
 import numpy as np
 import torch
 import gym
-from env import PrismaticEnv
+from flex_spot.sim.env_1 import PrismaticEnv
 from td3 import TD3, ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 

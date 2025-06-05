@@ -1,26 +1,30 @@
+# sim/config.yaml
 env:
   gui: false
-  max_force: 300.0
+  max_force_per_pusher: 50.0
   friction: 0.5
+  angular_damping_factor: 0.2 
   goal_pos: [2.0, 0.0]
   goal_thresh: 0.1
-  max_steps: 2000
+  max_steps: 500
+  pusher_offset_distance: 0.15
+  randomize_initial_yaw: true 
+  initial_yaw_range: [-3.14159, 3.14159] # Radians: e.g., +/- 180 degrees
 
 agent:
-  lr: 0.0001
+  lr: 0.0003 
   max_action: 1.0
   batch_size: 100
-  replay_buffer_max_size: 500000
+  replay_buffer_max_size: 1000000 
   gamma: 0.99
   polyak: 0.995
   policy_noise: 0.2
-  noise_clip: 1
-  policy_delay: 2
-  n_iter: 1
-  exploration_noise: 0.1
+  noise_clip: 0.5 
+  policy_delay: 2 
+  n_iter: 1 
+  exploration_noise: 0.1 
 
 training:
-  episodes: 50000
-  start_timesteps: 200
+  episodes: 30000 
+  start_timesteps: 50000
   save_freq: 5000
-  save_dir: "models/"

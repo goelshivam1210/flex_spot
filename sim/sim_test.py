@@ -9,7 +9,7 @@ FRICTION = 0.5
 SIMULATION_STEP = 1./240.
 
 # Connect to PyBullet in GUI mode.
-physicsClient = p.connect(p.GUI)
+physicsClient = p.connect(p.DIRECT)
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
 p.setTimeStep(SIMULATION_STEP)
 p.setGravity(0, 0, -9.8)

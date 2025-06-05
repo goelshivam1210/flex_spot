@@ -77,3 +77,10 @@ models/
 # Ignore mypy and pylint cache
 .mypy_cache/
 .pytest_cache/
+
+# results
+flex_spot_runs
+flex_spot_runs_2
+playback_videos_headless
+results_1
+results_2
