@@ -21,13 +21,15 @@ import bosdyn.client.util
 from bosdyn.api import geometry_pb2, image_pb2, manipulation_api_pb2
 from bosdyn.client.image import ImageClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
-from bosdyn.client.robot_command import RobotCommandClient, blocking_stand
+from bosdyn.client.robot_command import RobotCommandClient, blocking_stand, RobotCommandBuilder
+from bosdyn.client.robot_state import RobotStateClient
+
+from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
+from bosdyn.api.geometry_pb2 import SE2VelocityLimit, SE2Velocity, Vec2
+
 
 g_image_click = None
 g_image_display = None
-
-# robot_image_clicks = {}
-# robot_image_displays = {}
 
 def collect_target_for_robot(config, robot_id, hostname, username=None, password=None):
     """Connect to robot, get image, and collect user target selection"""
@@ -70,7 +72,7 @@ def collect_target_for_robot(config, robot_id, hostname, username=None, password
         dtype = np.uint16
     else:
         dtype = np.uint8
-    img = np.fromstring(image.shot.image.data, dtype=dtype)
+    img = np.frombuffer(image.shot.image.data, dtype=dtype)
     if image.shot.image.format == image_pb2.Image.FORMAT_RAW:
         img = img.reshape(image.shot.image.rows, image.shot.image.cols)
     else:
@@ -78,7 +80,7 @@ def collect_target_for_robot(config, robot_id, hostname, username=None, password
 
     # Show image and wait for click
     print(f'Robot {robot_id}: Click on an object to walk up to...')
-    image_title = f'Robot {robot_id} - Click to walk up to something'
+    image_title = 'Click to walk up to something'
     cv2.namedWindow(image_title)
     cv2.setMouseCallback(image_title, cv_mouse_callback)
 
@@ -94,8 +96,6 @@ def collect_target_for_robot(config, robot_id, hostname, username=None, password
 
     print(f'Robot {robot_id}: Target selected at ({g_image_click[0]}, {g_image_click[1]})')
     print(f'Robot {robot_id}: Press any key to continue to next robot...')
-    # cv2.waitKey(0)  # Wait for user confirmation
-    # cv2.destroyWindow(image_title)
     
     # Return the target data
     return {
@@ -107,7 +107,7 @@ def collect_target_for_robot(config, robot_id, hostname, username=None, password
         'image_data': image
     }
 
-def execute_walk_for_robot(config, robot_config):
+def execute_walk_for_robot(config, robot_config, barrier):
     """Execute the walk command for a robot with preset target"""
     robot_id = robot_config['robot_id']
     hostname = robot_config['hostname']
@@ -150,6 +150,7 @@ def execute_walk_for_robot(config, robot_config):
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
         blocking_stand(command_client, timeout_sec=10)
         robot.logger.info(f'Robot {robot_id}: Standing.')
+        barrier.wait()
 
         # Use the preset target point
         robot.logger.info(f'Robot {robot_id}: Walking to preset target at ({target_point[0]}, {target_point[1]})')
@@ -190,7 +191,32 @@ def execute_walk_for_robot(config, robot_config):
                 break
 
         robot.logger.info(f'Robot {robot_id}: Finished.')
+        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+        robot_state = robot_state_client.get_robot_state()
+        transforms = robot_state.kinematic_state.transforms_snapshot
+        obstacles = spot_command_pb2.ObstacleParams(disable_vision_body_obstacle_avoidance=True,
+                                                    disable_vision_foot_obstacle_avoidance=True,
+                                                    disable_vision_foot_constraint_avoidance=True,
+                                                    obstacle_avoidance_padding=.001)
+        speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
+                linear=Vec2(x=0.5, y=0.5), angular=1.0))        
+        mobility_params = spot_command_pb2.MobilityParams(
+                    obstacle_params=obstacles, vel_limit=speed_limit,
+                    locomotion_hint=spot_command_pb2.HINT_AUTO)
         
+        traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+            1.0,
+            0.0,
+            0.0,
+            transforms,
+            params = mobility_params
+        )
+        barrier.wait()
+        end_time_secs = time.time() + 5  # Half second for command execution
+        command_client.robot_command(traj_cmd, end_time_secs=end_time_secs)
+        # command_client.robot_command(traj_cmd)
+        time.sleep(5)
+        robot.logger.info(f'Robot {robot_id}: Finished 1 m bump')
         # Power off
         robot.logger.info(f'Robot {robot_id}: Sitting down and turning off.')
         robot.power_off(cut_immediately=False, timeout_sec=20)
@@ -198,27 +224,6 @@ def execute_walk_for_robot(config, robot_config):
         robot.logger.info(f'Robot {robot_id}: Safely powered off.')
         
         return True
-
-# def cv_mouse_callback(event, x, y, flags, param):
-#     robot_id = param
-#     clone = robot_image_displays[robot_id].copy()
-
-#     # global g_image_click, g_image_display
-#     # clone = g_image_display.copy()
-#     if event == cv2.EVENT_LBUTTONUP:
-#         robot_image_clicks[robot_id] = (x,y)
-#     else:
-#         # Draw some lines on the image.
-#         #print('mouse', x, y)
-#         color = (30, 30, 30)
-#         thickness = 2
-#         image_title = f'Robot {robot_id} - Click to walk up to something'
-#         height = clone.shape[0]
-#         width = clone.shape[1]
-#         cv2.line(clone, (0, y), (width, y), color, thickness)
-#         cv2.line(clone, (x, 0), (x, height), color, thickness)
-#         cv2.imshow(image_title, clone)
-
 
 def cv_mouse_callback(event, x, y, flags, param):
     global g_image_click, g_image_display
@@ -306,22 +311,39 @@ def main():
         print("\n=== Synchronized robot execution ===")
         
         import threading
+
+        num_parties = 3
+        sync_barrier = threading.Barrier(num_parties)
         
         # Create threads for synchronized execution
         thread1 = threading.Thread(
             target=execute_walk_for_robot,
-            args=(options, robot_configs[0])
+            args=(options, robot_configs[0], sync_barrier)
         )
         
         thread2 = threading.Thread(
             target=execute_walk_for_robot,
-            args=(options, robot_configs[1])
+            args=(options, robot_configs[1], sync_barrier)
         )
         
         # Start both threads simultaneously
         print("Starting both robots simultaneously...")
         thread1.start()
         thread2.start()
+
+        try:
+            # === MAIN THREAD AT CHECKPOINT 2 ===
+            print("MAIN: Waiting for all robots to stand...")
+            sync_barrier.wait()
+            print("MAIN: All robots are standing. Walk command initiated.")
+
+            # === MAIN THREAD AT CHECKPOINT 3 ===
+            print("MAIN: Waiting for all robots to complete their walk...")
+            sync_barrier.wait()
+            print("MAIN: All robots have completed their walk.")
+
+        except threading.BrokenBarrierError:
+            print("MAIN: A barrier was broken! One of the robots likely failed its task.")
         
         # Wait for both to complete
         thread1.join()
