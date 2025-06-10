@@ -161,9 +161,11 @@ def main():
         state, _ = env.reset()
         ep_reward = 0
         done = False
+        ep_steps = 0
 
-        while not done:
+        while not done and ep_steps < env.max_steps:
             total_steps += 1
+            ep_steps += 1
 
             # Select action: random during initial exploration phase
             if total_steps < start_timesteps:
