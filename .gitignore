@@ -77,3 +77,4 @@ models/
 # Ignore mypy and pylint cache
 .mypy_cache/
 .pytest_cache/
+/spot-sdk
