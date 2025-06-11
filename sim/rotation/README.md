@@ -1,4 +1,4 @@
-### Learning force-based controllers for rigid body movement along curved paths
+## Learning force-based controllers for rigid body movement along curved paths
 
 This module trains path-following policies in PyBullet simulation with dual force application methods for sim-to-real transfer to multi-robot systems.
 
