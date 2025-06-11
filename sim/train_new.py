@@ -28,7 +28,9 @@ def test_policy(env, agent, num_episodes=20, render=False):
     total_reward = 0
     successes = 0
     
+    # loop over test episodes
     for ep in range(num_episodes):
+        # reset environment
         state, _ = env.reset()
         ep_reward = 0
         terminated = False
@@ -39,6 +41,7 @@ def test_policy(env, agent, num_episodes=20, render=False):
         while not (terminated or truncated) and ep_steps < env.max_steps :
             action = agent.select_action(np.array(state)) # TD3 select_action returns flattened already
             
+            # step the environment
             next_state, reward, terminated, truncated, info = env.step(action) # Env returns 5 values
             state = next_state
             ep_reward += reward
@@ -53,11 +56,15 @@ def test_policy(env, agent, num_episodes=20, render=False):
         
         total_reward += ep_reward
     
+    # summary stats
     avg_reward = total_reward / num_episodes if num_episodes > 0 else 0
     success_rate = successes / num_episodes if num_episodes > 0 else 0
     return {"avg_reward": avg_reward, "success_rate": success_rate}
 
+
+# main training loop
 def main():
+    # argument parsing
     parser = argparse.ArgumentParser(description="Train a TD3 agent on the Prismatic Environment")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
@@ -67,11 +74,13 @@ def main():
     parser.add_argument("--test_freq", type=int, default=1000, help="Test policy every n episodes")
     args = parser.parse_args()
     
+    # load config from YAML file
     with open(args.config, "r") as f: config = yaml.safe_load(f)
     env_cfg = config["env"]
     agent_cfg = config["agent"]
     training_cfg = config["training"]
 
+    # set up seed
     seed = args.seed
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -105,6 +114,7 @@ def main():
         "initial_yaw_range": np.array(env_cfg.get("initial_yaw_range", [-math.pi, math.pi]))
     }
 
+    # env initialization
     env = PrismaticEnv(**env_kwargs)
     test_env_kwargs = env_kwargs.copy()
     test_env_kwargs["gui"] = args.render_test
@@ -118,10 +128,12 @@ def main():
     action_dim = env.action_space.shape[0]
     max_action_val = float(env.action_space.high[0]) # Assuming high is [1.0, 1.0]
 
+    # create td3 agent and its replay buffer
     agent = TD3(lr=agent_cfg.get("lr", 1e-4),
                 state_dim=state_dim, action_dim=action_dim, max_action=max_action_val)
     replay_buffer = ReplayBuffer(max_size=int(agent_cfg.get("replay_buffer_max_size", 1e6)))
 
+    # parameters for training
     episodes = training_cfg.get("episodes", 50000)
     start_timesteps = training_cfg.get("start_timesteps", 10000)
     batch_size = agent_cfg.get("batch_size", 100)
@@ -144,18 +156,22 @@ def main():
         episode_terminated = False
         episode_truncated = False
         current_ep_steps = 0
-
+        
+        # step until termination or truncation
         while not (episode_terminated or episode_truncated):
             total_steps += 1
             current_ep_steps +=1
 
+            # choose action: random for initial exploration phase
             if total_steps < start_timesteps:
                 action = env.action_space.sample()
             else:
+                # policy action + noise
                 action_from_policy = agent.select_action(np.array(state))
                 noise = np.random.normal(0, max_action_val * exploration_noise_std, size=action_dim)
                 action = (action_from_policy + noise).clip(env.action_space.low, env.action_space.high)
             
+            # perform env step
             next_state, reward, terminated, truncated, info = env.step(action)
             
             # done_for_buffer for TD3 should be 1.0 if terminated (true end), 0.0 if truncated or ongoing
@@ -165,6 +181,7 @@ def main():
             state = next_state
             ep_reward += reward
 
+            # update agent if we have enough samples
             if replay_buffer.current_size > batch_size:
                 agent.update(replay_buffer, n_iter_grad, batch_size, gamma, polyak, policy_noise, noise_clip, policy_delay)
             

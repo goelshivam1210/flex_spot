@@ -37,9 +37,11 @@ class PrismaticEnv(gym.Env):
         self.dt = 1.0 / 240.0
         self.sim_steps = 12
 
+        # pusher geometry
         self.pusher_offset_distance = pusher_offset_distance
         self.box_half_extents = np.array([0.25, 0.25, 0.25]) #default
 
+        # initial yaw randomization
         self.randomize_initial_yaw = randomize_initial_yaw
         self.initial_yaw_range = initial_yaw_range
 
@@ -101,6 +103,7 @@ class PrismaticEnv(gym.Env):
                                              cameraTargetPosition=[0.75, 0.0, 0.1], physicsClientId=self.client)
             else:
                 self.client = p.connect(p.DIRECT)
+        # set search path, timestep, gravity
         p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client)
         p.setTimeStep(self.dt, physicsClientId=self.client)
         p.setGravity(0, 0, -9.8, physicsClientId=self.client)
@@ -231,6 +234,7 @@ class PrismaticEnv(gym.Env):
         left_thrust_scale = np.clip(action[0], 0.0, 1.0)
         right_thrust_scale = np.clip(action[1], 0.0, 1.0)
 
+        # get pose
         box_pos_w, box_orn_w_quat = p.getBasePositionAndOrientation(self.box_id, physicsClientId=self.client)
         _, _, box_yaw_rad_world = p.getEulerFromQuaternion(box_orn_w_quat, physicsClientId=self.client)
 
@@ -260,9 +264,11 @@ class PrismaticEnv(gym.Env):
                                      box_pos_w[1] + cp2_world_offset[1], 
                                      box_pos_w[2]])
 
+        # apply forces in world frame
         p.applyExternalForce(self.box_id, -1, applied_force1_3d, force_app_pos1_w, p.WORLD_FRAME, physicsClientId=self.client)
         p.applyExternalForce(self.box_id, -1, applied_force2_3d, force_app_pos2_w, p.WORLD_FRAME, physicsClientId=self.client)
 
+        # step simulation
         for _ in range(self.sim_steps):
             p.stepSimulation(physicsClientId=self.client)
             if self.gui: time.sleep(self.dt / self.sim_steps)

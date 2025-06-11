@@ -8,7 +8,6 @@ import os
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-
 class Actor(nn.Module):
     # Action space is now 2D: [left_thrust_scale, right_thrust_scale] in [0,1]
     def __init__(self, state_dim, action_dim, max_action_val): # action_dim will be 2
@@ -16,8 +15,9 @@ class Actor(nn.Module):
         self.l1 = nn.Linear(state_dim, 400)
         self.l2 = nn.Linear(400, 300)
         self.l3 = nn.Linear(300, action_dim) # Outputs 2 values for the two thrusts
-        self.max_action = max_action_val # Should be 1.0 as env.action_space is Box(0,1)
+        self.max_action = max_action_val # Should be 1.0, as env.action_space is Box(0,1)
 
+    # forward pass through actor network
     def forward(self, state):
         a = F.relu(self.l1(state))
         a = F.relu(self.l2(a))
@@ -25,6 +25,7 @@ class Actor(nn.Module):
         # If env.action_space is [0,1], max_action should be 1.0.
         return torch.sigmoid(self.l3(a)) * self.max_action
 
+# Critic network for TD3: two q-value estimators share no weights
 class Critic(nn.Module): # action_dim will be 2
     def __init__(self, state_dim, action_dim):
         super(Critic, self).__init__()
@@ -36,7 +37,7 @@ class Critic(nn.Module): # action_dim will be 2
         self.l1_q2 = nn.Linear(state_dim + action_dim, 400)
         self.l2_q2 = nn.Linear(400, 300)
         self.l3_q2 = nn.Linear(300, 1)
-        
+    
     def forward(self, state, action):
         sa = torch.cat([state, action], 1)
         q1 = F.relu(self.l1_q1(sa)); q1 = F.relu(self.l2_q1(q1)); q1 = self.l3_q1(q1)
@@ -48,6 +49,7 @@ class Critic(nn.Module): # action_dim will be 2
         q1 = F.relu(self.l1_q1(sa)); q1 = F.relu(self.l2_q1(q1)); q1 = self.l3_q1(q1)
         return q1
 
+# replay buffer for off-policy learning
 class ReplayBuffer:
     def __init__(self, max_size=5e5):
         self.buffer = []
@@ -55,6 +57,7 @@ class ReplayBuffer:
         self.ptr = 0
         self.current_size = 0
 
+    # add transition to buffer
     def add(self, transition):
         if self.current_size < self.max_size:
             self.buffer.append(None)
@@ -62,6 +65,7 @@ class ReplayBuffer:
         self.ptr = (self.ptr + 1) % self.max_size
         self.current_size = min(self.current_size + 1, self.max_size)
 
+    # sample batch of transitions at random
     def sample(self, batch_size):
         indexes = np.random.randint(0, self.current_size, size=batch_size)
         state, action, reward, next_state, done = [], [], [], [], []
@@ -99,12 +103,14 @@ class TD3:
         for _ in range(n_iter): # This loop is for gradient steps per call to update
             state, action, reward, next_state, done_for_bellman = replay_buffer.sample(batch_size)
 
+            # convert to tensors
             state = torch.FloatTensor(state).to(device)
             action = torch.FloatTensor(action).to(device)
             reward = torch.FloatTensor(reward).to(device)
             next_state = torch.FloatTensor(next_state).to(device)
             done_for_bellman = torch.FloatTensor(done_for_bellman).to(device)
 
+            # Critic target calculation
             with torch.no_grad():
                 noise = (torch.randn_like(action) * policy_noise).clamp(-noise_clip, noise_clip)
                 next_action = self.actor_target(next_state) + noise
@@ -114,6 +120,7 @@ class TD3:
                 target_Q = torch.min(target_Q1, target_Q2)
                 target_Q = reward + (1.0 - done_for_bellman) * gamma * target_Q
 
+            # Critic update
             current_Q1, current_Q2 = self.critic(state, action)
             critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
 
@@ -123,17 +130,20 @@ class TD3:
 
             self.policy_update_counter += 1
 
+            # delayed policy update
             if self.policy_update_counter % policy_delay == 0:
                 actor_loss = -self.critic.Q1(state, self.actor(state)).mean()
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
                 self.actor_optimizer.step()
 
+                # update target networks
                 for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
                     target_param.data.copy_(polyak * target_param.data + (1 - polyak) * param.data)
                 for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
                     target_param.data.copy_(polyak * target_param.data + (1 - polyak) * param.data)
     
+    # save actor and critic weights to files in given directory
     def save(self, directory, name):
         if not os.path.exists(directory): os.makedirs(directory)
         torch.save(self.actor.state_dict(), os.path.join(directory, f"{name}_actor.pth"))
