@@ -13,6 +13,26 @@ from td3 import TD3, ReplayBuffer
 
 from torch.utils.tensorboard import SummaryWriter
 
+def random_arc_generalization_test(env, agent, episodes=100):
+    successes = 0
+    for _ in range(episodes):
+        # sample a random arc
+        r  = np.random.uniform(1.0, 2.0)
+        θ0 = np.random.uniform(-np.pi/2, 0)
+        θ1 = np.random.uniform(0, np.pi/2)
+        env.test_full_arc = True
+        env.arc_radius  = r
+        env.arc_start   = θ0
+        env.arc_end     = θ1
+        env.segment_length = None
+        state, _ = env.reset()
+        done = False
+        while not done:
+            action, = agent.select_action(np.array(state))
+            state, _, done, _, info = env.step(action)
+        successes += (info["progress"] > 0.95 and info["deviation"] < env.goal_thresh)
+    return successes / episodes
+
 def test_policy(env, agent, num_episodes=20, render=False):
     """
     Test the policy for a specified number of episodes and return statistics.
@@ -116,18 +136,31 @@ def main():
         friction=env_cfg.get("friction", 0.5),
         goal_thresh=env_cfg.get("goal_thresh", 0.1),
         max_steps=env_cfg.get("max_steps", 200),
-        seed = seed
+        seed = seed,
+        segment_length=0.3
     )
-    
-    # Create a separate environment for testing
-    test_env = SimplePathFollowingEnv(
+    # Create a separate environment for testing small segments    
+    test_env_full = SimplePathFollowingEnv(
         gui=args.render_test,  # Only use GUI if we're rendering test episodes
         max_force=env_cfg.get("max_force", 100.0),
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.5),
         goal_thresh=env_cfg.get("goal_thresh", 0.1),
         max_steps=env_cfg.get("max_steps", 200),
-        seed = seed
+        seed = seed,
+        segment_length= env_cfg.get("segment_length", 0.3)
+    )
+
+    # Create a separate environment for testing arbitrary curves by stitching learned micro policies
+    test_env_short = SimplePathFollowingEnv(
+        gui=args.render_test,  # Only use GUI if we're rendering test episodes
+        max_force=env_cfg.get("max_force", 100.0),
+        max_torque=env_cfg.get("max_torque", 50.0),
+        friction=env_cfg.get("friction", 0.5),
+        goal_thresh=env_cfg.get("goal_thresh", 0.1),
+        max_steps=env_cfg.get("max_steps", 200),
+        seed = seed,
+        segment_length= None
     )
 
     state_dim = env.observation_space.shape[0]
@@ -154,73 +187,102 @@ def main():
     n_iter = agent_cfg.get("n_iter", 1)
     exploration_noise = agent_cfg.get("exploration_noise", 0.1)
 
+    # --- Training Loop ---
     total_steps = 0
-    best_success_rate = 0
+    best_full_success = 0.0
 
     for ep in range(episodes):
+        # Reset training environment (draws a new short segment automatically)
         state, _ = env.reset()
-        ep_reward = 0
+        ep_reward = 0.0
         done = False
         ep_steps = 0
 
+        # Run one episode
         while not done and ep_steps < env.max_steps:
             total_steps += 1
             ep_steps += 1
 
-            # Select action: random during initial exploration phase
+            # Action selection: random until warm‐up, then policy + noise
             if total_steps < start_timesteps:
                 action = env.action_space.sample()
             else:
-                action = agent.select_action(np.array(state))
-                # Ensure action is a 1D array of correct shape
+                action = agent.select_action(state)
                 if action.ndim > 1:
                     action = action.squeeze(0)
-                action = action.flatten()
-                # Add exploration noise
                 noise = np.random.normal(0, exploration_noise, size=action_dim)
-                action = (action + noise).clip(env.action_space.low, env.action_space.high)
+                action = np.clip(action + noise, env.action_space.low, env.action_space.high)
 
+            # Step and store
             next_state, reward, done, _, _ = env.step(action)
             replay_buffer.add((state, action, reward, next_state, float(done)))
             state = next_state
             ep_reward += reward
 
-            # Update TD3 agent if replay buffer has enough samples
+            # TD3 update
             if replay_buffer.size > batch_size:
-                agent.update(replay_buffer, n_iter, batch_size, gamma, polyak, policy_noise, noise_clip, policy_delay)
+                agent.update(
+                    replay_buffer,
+                    n_iter,
+                    batch_size,
+                    gamma,
+                    polyak,
+                    policy_noise,
+                    noise_clip,
+                    policy_delay
+                )
 
-        # Log episode reward
-        print(f"Seed {seed} | Episode {ep}: Reward = {ep_reward:.2f}")
-        writer.add_scalar("Reward/Episode", ep_reward, ep)
+        # Log training reward
+        print(f"[Ep {ep:4d}] Train Reward: {ep_reward:.2f}")
+        writer.add_scalar("Train/EpisodeReward", ep_reward, ep)
 
-        # Test policy periodically
+        # Periodic evaluation on both short segment & full arc
         if ep % args.test_freq == 0:
-            test_stats = test_policy(test_env, agent, num_episodes=args.test_episodes, render=args.render_test)
-            print(f"Testing policy - Avg. Reward: {test_stats['avg_reward']:.2f}, Success: {test_stats['success_rate']:.2f}")
-            writer.add_scalar("Test/AvgReward", test_stats['avg_reward'], ep)
-            writer.add_scalar("Test/SuccessRate", test_stats['success_rate'], ep)
-            
-            # Save the best model based on success rate
-            if test_stats['success_rate'] > best_success_rate:
-                best_success_rate = test_stats['success_rate']
+            short_stats = test_policy(test_env_short, agent,
+                                    num_episodes=args.test_episodes,
+                                    render=args.render_test)
+            full_stats  = test_policy(test_env_full, agent,
+                                    num_episodes=args.test_episodes,
+                                    render=args.render_test)
+
+            print(f"  >> Short‐seg Success: {short_stats['success_rate']:.2f}, "
+                f"Full‐arc Success: {full_stats['success_rate']:.2f}")
+            writer.add_scalar("Eval/ShortSuccess", short_stats["success_rate"], ep)
+            writer.add_scalar("Eval/FullSuccess",  full_stats["success_rate"],  ep)
+            writer.add_scalar("Eval/ShortReward",  short_stats["avg_reward"],   ep)
+            writer.add_scalar("Eval/FullReward",   full_stats["avg_reward"],    ep)
+
+            # Save best model on full‐arc success
+            if full_stats["success_rate"] > best_full_success:
+                best_full_success = full_stats["success_rate"]
                 agent.save(models_dir, "best_model")
-                print(f"New best model saved with success rate: {best_success_rate:.2f}")
+                print(f" New best full‐arc success: {best_full_success:.2f} — model saved")
 
-        # Save the model periodically
+        # Periodic checkpointing
         if ep % training_cfg.get("save_freq", 100) == 0:
-            agent.save(models_dir, f"td3_ep{ep}")
+            agent.save(models_dir, f"checkpoint_ep{ep}")
 
-    # Final test and evaluation
-    final_test_stats = test_policy(test_env, agent, num_episodes=args.test_episodes*2, render=args.render_test)
-    print(f"\nFinal Policy Evaluation:")
-    print(f"Average Reward: {final_test_stats['avg_reward']:.2f}")
-    print(f"Success Rate: {final_test_stats['success_rate']:.2f}")
-    
+    # --- Final Evaluation ---
+    final_short = test_policy(test_env_short, agent,
+                            num_episodes=args.test_episodes * 2,
+                            render=args.render_test)
+    final_full  = test_policy(test_env_full,  agent,
+                            num_episodes=args.test_episodes * 2,
+                            render=args.render_test)
+    print(f"\nFINAL SHORT‐SEG: Reward={final_short['avg_reward']:.2f}, Success={final_short['success_rate']:.2f}")
+    print(f"FINAL FULL‐ARC:  Reward={final_full['avg_reward']:.2f}, Success={final_full['success_rate']:.2f}")
+
     # Save final model
     agent.save(models_dir, "final_model")
 
+    # Large‐scale generalization test
+    gen_rate = random_arc_generalization_test(test_env_full, agent, episodes=100)
+    print(f"Random‐Arc Generalization (100 trials): Success Rate={gen_rate:.2f}")
+
+    # Clean up
     env.close()
-    test_env.close()
+    test_env_short.close()
+    test_env_full.close()
     writer.close()
 
 if __name__ == "__main__":

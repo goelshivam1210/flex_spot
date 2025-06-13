@@ -30,7 +30,10 @@ class SimplePathFollowingEnv(gym.Env):
         goal_thresh=0.2, 
         max_steps=500,
         goal_reward=100,
-        seed=None
+        seed=None,
+        segment_length=0.3,
+        test_full_arc=False,
+        arc_radius=1.5, arc_start=-np.pi/3, arc_end=np.pi/3
     ):
         super(SimplePathFollowingEnv, self).__init__()
         
@@ -84,8 +87,14 @@ class SimplePathFollowingEnv(gym.Env):
         self._connect()
         
         # Generate arc path points
-        self.path_points = self._generate_arc_path()
+        # self.path_points = self._generate_arc_path()
+        self.test_full_arc = test_full_arc
+        self.full_path = self._generate_arc_path(arc_radius, arc_start, arc_end)
         
+        # slice a random training segment
+        self.segment_length = segment_length
+        self._make_training_segment()
+
         # Previous position for speed calculation
         self.prev_position = None
         self.prev_time = None
@@ -106,7 +115,7 @@ class SimplePathFollowingEnv(gym.Env):
         p.setTimeStep(self.dt)
         p.setGravity(0, 0, -9.8)
     
-    def _generate_arc_path(self):
+    def _generate_arc_path(self, radius=1.5, start_angle=-np.pi/3, end_angle=np.pi/3, num_points=50):
         """Generate points along an arc path"""
         radius = 1.5
         start_angle = -np.pi/3
@@ -121,8 +130,50 @@ class SimplePathFollowingEnv(gym.Env):
         
         return np.array(points)
     
+    def _make_training_segment(self):
+        """
+        Randomly slice a contiguous sub‐segment of length approximately self.segment_length
+        from the full path self.full_path. If segment_length is None or exceeds total path
+        length, we just use the entire path.
+        """
+        full = self.full_path
+        n = len(full)
+        if self.segment_length is None:
+            self.path_points = full.copy()
+            return
+
+        # Compute cumulative arc‐length along the full path
+        disp = np.linalg.norm(np.diff(full, axis=0), axis=1)  # (n-1,)
+        cumlen = np.concatenate(([0.0], np.cumsum(disp)))     # (n,)
+
+        total_length = cumlen[-1]
+        seg_len = self.segment_length
+
+        # If requested segment is too long, just use full path
+        if seg_len >= total_length or n < 2:
+            self.path_points = full.copy()
+            return
+
+        # Randomly choose a starting arc‐length so that segment fits
+        start_dist = np.random.rand() * (total_length - seg_len)
+        end_dist = start_dist + seg_len
+
+        # Find the indices that bracket these distances
+        i0 = np.searchsorted(cumlen, start_dist, side='right') - 1
+        i1 = np.searchsorted(cumlen, end_dist, kind='right')
+        i0 = max(0, i0)
+        i1 = min(n - 1, i1)
+
+        # Slice the points
+        self.path_points = full[i0 : i1 + 1].copy()
+    
     def reset(self):
         """Reset the environment to its initial state"""
+        # if in “full‐arc test” mode, rebuild full_path and disable slicing
+        if self.test_full_arc:
+            self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
+            self.segment_length = None
+        self._make_training_segment()
         p.resetSimulation()
         p.setGravity(0, 0, -9.8)
         
