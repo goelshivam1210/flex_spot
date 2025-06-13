@@ -6,6 +6,7 @@ import pybullet as p
 import pybullet_data
 import time
 from gym import spaces
+from scipy.interpolate import CubicSpline
 
 class SimplePathFollowingEnv(gym.Env):
     """
@@ -114,6 +115,36 @@ class SimplePathFollowingEnv(gym.Env):
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setTimeStep(self.dt)
         p.setGravity(0, 0, -9.8)
+
+    def _generate_random_path(self,
+                              num_waypoints=5,
+                              span=3.0,
+                              noise=0.2,
+                              num_points=200):
+        """
+        Build a random smooth path by:
+        sampling `num_waypoints` in a box [-span,span]^2
+        sorting them by x (or along some heuristic)
+        fitting a cubic spline through them, then
+        resampling `num_points` points along the spline
+        """
+        # sample waypoints
+        pts = np.random.uniform(-span, span, size=(num_waypoints, 2))
+        # sort by x so it “flows” forward
+        pts = pts[np.argsort(pts[:,0])]
+        # add little jitter so it isn’t exactly monotonic
+        pts[:,1] += np.random.randn(num_waypoints)*noise
+
+        # spline in x→y
+        xs, ys = pts[:,0], pts[:,1]
+        cs = CubicSpline(xs, ys, bc_type='natural')
+
+        # sample uniformly in x
+        x_min, x_max = xs.min(), xs.max()
+        xs_eval = np.linspace(x_min, x_max, num_points)
+        ys_eval = cs(xs_eval)
+
+        return np.stack([xs_eval, ys_eval], axis=1)
     
     def _generate_arc_path(self, radius=1.5, start_angle=-np.pi/3, end_angle=np.pi/3, num_points=50):
         """Generate points along an arc path"""
@@ -160,7 +191,7 @@ class SimplePathFollowingEnv(gym.Env):
 
         # Find the indices that bracket these distances
         i0 = np.searchsorted(cumlen, start_dist, side='right') - 1
-        i1 = np.searchsorted(cumlen, end_dist, kind='right')
+        i1 = np.searchsorted(cumlen, end_dist, side='right')
         i0 = max(0, i0)
         i1 = min(n - 1, i1)
 

@@ -84,12 +84,12 @@ def test_policy(env, agent, num_episodes=20, render=False):
 
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Train a TD3 agent on the Prismatic Environment")
+    parser = argparse.ArgumentParser(description="Train a TD3 agent on the Environment")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--render_test", action="store_true", help="Render environment during testing")
     parser.add_argument("--test_episodes", type=int, default=20, help="Number of episodes to test on")
-    parser.add_argument("--test_freq", type=int, default=1000, help="Test policy every n episodes")
+    parser.add_argument("--test_freq", type=int, default=50, help="Test policy every n episodes")
     args = parser.parse_args()
     
     # Load configuration parameters from config file
@@ -135,9 +135,9 @@ def main():
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.5),
         goal_thresh=env_cfg.get("goal_thresh", 0.1),
-        max_steps=env_cfg.get("max_steps", 200),
+        max_steps=env_cfg.get("max_steps", 150),
         seed = seed,
-        segment_length=0.3
+        segment_length=env_cfg.get("segment_length", 0.3)
     )
     # Create a separate environment for testing small segments    
     test_env_full = SimplePathFollowingEnv(
@@ -146,7 +146,7 @@ def main():
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.5),
         goal_thresh=env_cfg.get("goal_thresh", 0.1),
-        max_steps=env_cfg.get("max_steps", 200),
+        max_steps=env_cfg.get("max_steps", 1000),
         seed = seed,
         segment_length= env_cfg.get("segment_length", 0.3)
     )
@@ -158,7 +158,7 @@ def main():
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.5),
         goal_thresh=env_cfg.get("goal_thresh", 0.1),
-        max_steps=env_cfg.get("max_steps", 200),
+        max_steps=env_cfg.get("max_steps", 100),
         seed = seed,
         segment_length= None
     )
@@ -235,6 +235,7 @@ def main():
         # Log training reward
         print(f"[Ep {ep:4d}] Train Reward: {ep_reward:.2f}")
         writer.add_scalar("Train/EpisodeReward", ep_reward, ep)
+        writer.add_scalar("Train/Steps", ep_steps, ep)
 
         # Periodic evaluation on both short segment & full arc
         if ep % args.test_freq == 0:
@@ -247,10 +248,10 @@ def main():
 
             print(f"  >> Short‐seg Success: {short_stats['success_rate']:.2f}, "
                 f"Full‐arc Success: {full_stats['success_rate']:.2f}")
-            writer.add_scalar("Eval/ShortSuccess", short_stats["success_rate"], ep)
-            writer.add_scalar("Eval/FullSuccess",  full_stats["success_rate"],  ep)
-            writer.add_scalar("Eval/ShortReward",  short_stats["avg_reward"],   ep)
-            writer.add_scalar("Eval/FullReward",   full_stats["avg_reward"],    ep)
+            writer.add_scalar("Eval/ShortSuccess", short_stats["success_rate"], total_steps)
+            writer.add_scalar("Eval/FullSuccess",  full_stats["success_rate"],  total_steps)
+            writer.add_scalar("Eval/ShortReward",  short_stats["avg_reward"],   total_steps)
+            writer.add_scalar("Eval/FullReward",   full_stats["avg_reward"],    total_steps)
 
             # Save best model on full‐arc success
             if full_stats["success_rate"] > best_full_success:
@@ -259,7 +260,7 @@ def main():
                 print(f" New best full‐arc success: {best_full_success:.2f} — model saved")
 
         # Periodic checkpointing
-        if ep % training_cfg.get("save_freq", 100) == 0:
+        if ep % training_cfg.get("save_freq", 2000) == 0:
             agent.save(models_dir, f"checkpoint_ep{ep}")
 
     # --- Final Evaluation ---
@@ -280,9 +281,9 @@ def main():
     print(f"Random‐Arc Generalization (100 trials): Success Rate={gen_rate:.2f}")
 
     # Clean up
-    env.close()
-    test_env_short.close()
-    test_env_full.close()
+    # env.close()
+    # test_env_short.close()
+    # test_env_full.close()
     writer.close()
 
 if __name__ == "__main__":

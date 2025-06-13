@@ -7,7 +7,6 @@ env:
   angular_damping: 0.1
   goal_pos: [2.0, 0.0]
   goal_thresh: 0.2
-  max_steps: 2000
   segment_length: 0.3
 
 agent:
@@ -24,10 +23,7 @@ agent:
   exploration_noise: 0.1
 
 training:
-  episodes: 20000
+  episodes: 2000
   start_timesteps: 200
-  save_freq: 5000
-  timesteps: 2000
+  save_freq: 500
   save_dir: "models/"
-
-
