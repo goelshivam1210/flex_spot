@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """
-Dual Force Application Test Script
+Dual Force Application Test Script with Policy Stitching
 
-Tests a trained TD3 policy in two modes:
-1. Single centroid force application (current method)
-2. Distributed contact forces on rear face (sim-to-real method)
+Tests how well the centroid-to-contact force transformation works with stitched policies:
 
-This validates that the same policy works with realistic contact force distribution.
+1. For each short segment:
+   - Get centroid forces from micro-policy
+   - Transform to contact forces using _wrench_to_contact_forces
+   - Compare performance between direct centroid application vs transformed contact forces
+
+2. For full arc (stitched policies):
+   - Get centroid forces from sequence of micro-policies
+   - Transform each policy's output to contact forces
+   - Compare if the transformation works as well with stitched policies as with individual ones
+
+This validates that the mathematical transformation from centroid to contact forces
+works correctly both for individual micro-policies and when stitching them together.
 """
 
 import os
@@ -26,6 +35,7 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         self.force_mode = "centroid"  # "centroid" or "contact"
         self.contact_points = None
         self.applied_contact_forces = None
+        self.current_segment = 0  # Track which segment we're on for stitching
     
     def set_force_mode(self, mode):
         """Set force application mode: 'centroid' or 'contact'"""
@@ -46,8 +56,6 @@ class DualForceTestEnv(SimplePathFollowingEnv):
             [offset_x, +offset_y, offset_z],  # Left rear contact at ground level
             [offset_x, -offset_y, offset_z]   # Right rear contact at ground level
         ])
-        
-
     
     def _wrench_to_contact_forces(self, wrench):
         """
@@ -97,22 +105,6 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         contact_forces = np.zeros((2, 3))
         contact_forces[:, :2] = contact_forces_2d  # Copy x,y forces
         contact_forces[:, 2] = 0  # z forces are zero
-   
-        
-        # Debug: verify equilibrium (disabled by default)
-        debug_equilibrium = False
-        if debug_equilibrium:
-            # Check force balance
-            total_force = np.sum(contact_forces, axis=0)
-            print(f"Force balance check - Input: [{Fx:.1f}, {Fy:.1f}], Output: [{total_force[0]:.1f}, {total_force[1]:.1f}]")
-            
-            # Check moment balance
-            moment_sum = 0
-            for i, (r, f) in enumerate(zip(self.contact_points, contact_forces)):
-                moment_contribution = r[0]*f[1] - r[1]*f[0]  # rx*fy - ry*fx
-                moment_sum += moment_contribution
-                print(f"Contact {i}: r={r[:2]}, f={f[:2]}, moment={moment_contribution:.1f}")
-            print(f"Moment balance check - Input: {tau_z:.1f}, Output: {moment_sum:.1f}")
         
         return contact_forces
     
@@ -161,6 +153,12 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         progress = state_after[3]
         deviation = state_after[4]
         
+        # Check if we need to switch to next segment
+        if self.segment_length is not None and progress > 0.95:
+            self.current_segment += 1
+            if self.gui:
+                print(f"Switching to segment {self.current_segment}")
+        
         done = False
         if progress > 0.95 and deviation < self.goal_thresh:
             done = True
@@ -182,7 +180,8 @@ class DualForceTestEnv(SimplePathFollowingEnv):
             "speed_along_path": state_after[5],
             "box_forward_x": state_after[6],
             "box_forward_y": state_after[7],
-            "force_mode": self.force_mode
+            "force_mode": self.force_mode,
+            "current_segment": self.current_segment
         }
         
         if self.gui and self.steps % 10 == 0:
@@ -226,12 +225,6 @@ class DualForceTestEnv(SimplePathFollowingEnv):
             # Transform force from box frame to world frame
             world_force = rotation_matrix @ force
             
-            # p.applyExternalForce(
-            #     self.box_id, -1, 
-            #     world_force.tolist(),
-            #     world_contact_point.tolist(),
-            #     p.WORLD_FRAME
-            # )
             p.applyExternalForce(
                 self.box_id, -1, 
                 force.tolist(),           # Box frame forces
@@ -323,6 +316,8 @@ def test_episode(env, agent, mode, max_steps=500):
     
     total_reward = 0
     step_count = 0
+    segment_rewards = []  # Track rewards per segment
+    current_segment = 0
     
     print(f"\n=== Testing in {mode.upper()} mode ===")
     
@@ -337,6 +332,12 @@ def test_episode(env, agent, mode, max_steps=500):
         total_reward += reward
         step_count += 1
         
+        # Track segment rewards
+        if info['current_segment'] != current_segment:
+            segment_rewards.append(total_reward)
+            current_segment = info['current_segment']
+            print(f"Completed segment {current_segment-1} with reward {segment_rewards[-1]:.2f}")
+        
         # Print progress periodically
         if step_count % 50 == 0:
             print(f"Step {step_count}: Progress={info['progress']:.3f}, "
@@ -344,6 +345,9 @@ def test_episode(env, agent, mode, max_steps=500):
         
         if done or truncated:
             break
+    
+    # Add final segment reward
+    segment_rewards.append(total_reward - sum(segment_rewards))
     
     print(f"Episode finished: Steps={step_count}, Total Reward={total_reward:.2f}")
     print(f"Final Progress: {info['progress']:.3f}, Final Deviation: {info['deviation']:.3f}")
@@ -356,12 +360,14 @@ def test_episode(env, agent, mode, max_steps=500):
         'steps': step_count,
         'success': success,
         'final_progress': info['progress'],
-        'final_deviation': info['deviation']
+        'final_deviation': info['deviation'],
+        'segment_rewards': segment_rewards,
+        'num_segments': len(segment_rewards)
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test dual force application methods")
+    parser = argparse.ArgumentParser(description="Test force transformation with stitched policies")
     parser.add_argument("--model_path", type=str, required=True, 
                        help="Path to trained model (e.g., runs/run-0-2024.../models/best_model)")
     parser.add_argument("--config", type=str, default="config.yaml",
@@ -381,8 +387,8 @@ def main():
     
     env_cfg = config["env"]
     
-    # Create test environment with GUI
-    env = DualForceTestEnv(
+    # Create test environments for both short segments and full arcs
+    env_short = DualForceTestEnv(
         gui=True,  # Always use GUI for testing
         max_force=env_cfg.get("max_force", 300.0),
         max_torque=env_cfg.get("max_torque", 50.0),
@@ -390,77 +396,118 @@ def main():
         linear_damping=env_cfg.get("linear_damping", 0.05),
         angular_damping=env_cfg.get("angular_damping", 0.1),
         goal_thresh=env_cfg.get("goal_thresh", 0.2),
-        max_steps=args.max_steps
+        max_steps=args.max_steps,
+        segment_length=env_cfg.get("segment_length", 0.3)  # Use same segment length as training
+    )
+    
+    env_full = DualForceTestEnv(
+        gui=True,  # Always use GUI for testing
+        max_force=env_cfg.get("max_force", 300.0),
+        max_torque=env_cfg.get("max_torque", 50.0),
+        friction=env_cfg.get("friction", 0.4),
+        linear_damping=env_cfg.get("linear_damping", 0.05),
+        angular_damping=env_cfg.get("angular_damping", 0.1),
+        goal_thresh=env_cfg.get("goal_thresh", 0.2),
+        max_steps=args.max_steps * 2,  # Longer for full arc
+        segment_length=None  # No segment length for full arc testing
     )
     
     # Load trained model
     print(f"Loading model from: {args.model_path}")
-    agent = load_trained_model(args.model_path, env)
+    agent = load_trained_model(args.model_path, env_short)
     print("Model loaded successfully!")
     
-    # Test both modes
+    # Test both modes on both environments
     modes = ["centroid", "contact"]
-    # modes = ["contact"]
-
+    envs = {
+        "short": env_short,
+        "full": env_full
+    }
+    
     results = {}
     
-    for mode in modes:
+    for env_name, env in envs.items():
         print(f"\n{'='*50}")
-        print(f"TESTING {mode.upper()} FORCE APPLICATION")
+        print(f"TESTING {env_name.upper()} SEGMENTS")
         print(f"{'='*50}")
         
-        mode_results = []
+        env_results = {}
         
-        for episode in range(args.episodes):
-            print(f"\n--- Episode {episode + 1}/{args.episodes} ---")
+        for mode in modes:
+            print(f"\n--- Testing {mode.upper()} mode on {env_name} segments ---")
             
-            result = test_episode(env, agent, mode, args.max_steps)
-            mode_results.append(result)
+            mode_results = []
             
-            # Add sleep for visualization
-            time.sleep(1.0)
+            for episode in range(args.episodes):
+                print(f"\nEpisode {episode + 1}/{args.episodes}")
+                
+                result = test_episode(env, agent, mode, args.max_steps)
+                mode_results.append(result)
+                
+                # Add sleep for visualization
+                time.sleep(1.0)
+            
+            # Calculate statistics
+            avg_reward = np.mean([r['total_reward'] for r in mode_results])
+            success_rate = np.mean([r['success'] for r in mode_results])
+            avg_steps = np.mean([r['steps'] for r in mode_results])
+            
+            # Calculate per-segment statistics
+            avg_segments = np.mean([r['num_segments'] for r in mode_results])
+            avg_segment_rewards = np.mean([np.mean(r['segment_rewards']) for r in mode_results])
+            
+            env_results[mode] = {
+                'episodes': mode_results,
+                'avg_reward': avg_reward,
+                'success_rate': success_rate,
+                'avg_steps': avg_steps,
+                'avg_segments': avg_segments,
+                'avg_segment_reward': avg_segment_rewards
+            }
+            
+            print(f"\n{mode.upper()} MODE SUMMARY ({env_name}):")
+            print(f"Average Reward: {avg_reward:.2f}")
+            print(f"Success Rate: {success_rate:.2f}")
+            print(f"Average Steps: {avg_steps:.1f}")
+            print(f"Average Segments: {avg_segments:.1f}")
+            print(f"Average Segment Reward: {avg_segment_rewards:.2f}")
         
-        # Calculate statistics
-        avg_reward = np.mean([r['total_reward'] for r in mode_results])
-        success_rate = np.mean([r['success'] for r in mode_results])
-        avg_steps = np.mean([r['steps'] for r in mode_results])
-        
-        results[mode] = {
-            'episodes': mode_results,
-            'avg_reward': avg_reward,
-            'success_rate': success_rate,
-            'avg_steps': avg_steps
-        }
-        
-        print(f"\n{mode.upper()} MODE SUMMARY:")
-        print(f"Average Reward: {avg_reward:.2f}")
-        print(f"Success Rate: {success_rate:.2f}")
-        print(f"Average Steps: {avg_steps:.1f}")
+        results[env_name] = env_results
     
     # Final comparison
     print(f"\n{'='*50}")
     print(f"FINAL COMPARISON")
     print(f"{'='*50}")
     
-    for mode in modes:
-        r = results[mode]
-        print(f"{mode.upper():>10}: Reward={r['avg_reward']:6.1f}, "
-              f"Success={r['success_rate']:4.2f}, Steps={r['avg_steps']:5.1f}")
+    for env_name in envs.keys():
+        print(f"\n{env_name.upper()} SEGMENTS:")
+        for mode in modes:
+            r = results[env_name][mode]
+            print(f"{mode.upper():>10}: Reward={r['avg_reward']:6.1f}, "
+                  f"Success={r['success_rate']:4.2f}, Steps={r['avg_steps']:5.1f}, "
+                  f"Segments={r['avg_segments']:4.1f}, SegReward={r['avg_segment_reward']:6.1f}")
     
-    # Check if performance is similar
-    reward_diff = abs(results['centroid']['avg_reward'] - results['contact']['avg_reward'])
-    success_diff = abs(results['centroid']['success_rate'] - results['contact']['success_rate'])
+    # Check if performance is similar between modes for each environment type
+    for env_name in envs.keys():
+        reward_diff = abs(results[env_name]['centroid']['avg_reward'] - 
+                         results[env_name]['contact']['avg_reward'])
+        success_diff = abs(results[env_name]['centroid']['success_rate'] - 
+                          results[env_name]['contact']['success_rate'])
+        segment_reward_diff = abs(results[env_name]['centroid']['avg_segment_reward'] - 
+                                results[env_name]['contact']['avg_segment_reward'])
+        
+        print(f"\nPerformance Difference ({env_name}):")
+        print(f"Total reward difference: {reward_diff:.2f}")
+        print(f"Success rate difference: {success_diff:.2f}")
+        print(f"Per-segment reward difference: {segment_reward_diff:.2f}")
+        
+        if reward_diff < 50 and success_diff < 0.2 and segment_reward_diff < 20:
+            print(f"GOOD: Force transformation works well for {env_name} segments")
+        else:
+            print(f"WARNING: Force transformation may not be working well for {env_name} segments")
     
-    print(f"\nPerformance Difference:")
-    print(f"Reward difference: {reward_diff:.2f}")
-    print(f"Success rate difference: {success_diff:.2f}")
-    
-    if reward_diff < 50 and success_diff < 0.2:
-        print("GOOD: Similar performance between modes - sim-to-real transfer validated!")
-    else:
-        print("WARNING: Significant performance difference detected")
-    
-    env.close()
+    env_short.close()
+    env_full.close()
 
 
 if __name__ == "__main__":
