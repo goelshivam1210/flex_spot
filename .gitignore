@@ -78,3 +78,4 @@ models/
 .mypy_cache/
 .pytest_cache/
 /spot-sdk
+*.png
