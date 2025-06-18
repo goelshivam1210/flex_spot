@@ -55,6 +55,9 @@ class SimplePathFollowingEnv(gym.Env):
         self.sim_steps = 6
         self.angle_bin_size = 10.0  # degrees for discretization
         self.num_bins = int(360/self.angle_bin_size)
+        self.arc_radius = arc_radius
+        self.arc_start = arc_start
+        self.arc_end = arc_end
         
         # Define observation space - 8 element enhanced state
         self.observation_space = spaces.Box(
