@@ -129,42 +129,6 @@ def main():
     # Initialize TensorBoard SummaryWriter
     writer = SummaryWriter(logs_dir)
 
-    # Create the environment for training
-    # env = SimplePathFollowingEnv(
-    #     gui=env_cfg.get("gui", False),
-    #     max_force=env_cfg.get("max_force", 100.0),
-    #     max_torque=env_cfg.get("max_torque", 50.0),
-    #     friction=env_cfg.get("friction", 0.5),
-    #     goal_thresh=env_cfg.get("goal_thresh", 0.1),
-    #     max_steps=env_cfg.get("max_steps", 150),
-    #     seed = seed,
-    #     segment_length=env_cfg.get("segment_length", 0.3)
-    # )
-
-    # # Create a separate environment for testing small segments    
-    # test_env_full = SimplePathFollowingEnv(
-    #     gui=args.render_test,  # Only use GUI if we're rendering test episodes
-    #     max_force=env_cfg.get("max_force", 100.0),
-    #     max_torque=env_cfg.get("max_torque", 50.0),
-    #     friction=env_cfg.get("friction", 0.5),
-    #     goal_thresh=env_cfg.get("goal_thresh", 0.1),
-    #     max_steps=env_cfg.get("max_steps", 1000),
-    #     seed = seed,
-    #     segment_length= env_cfg.get("segment_length", 0.3)
-    # )
-
-    # # Create a separate environment for testing arbitrary curves by stitching learned micro policies
-    # test_env_short = SimplePathFollowingEnv(
-    #     gui=args.render_test,  # Only use GUI if we're rendering test episodes
-    #     max_force=env_cfg.get("max_force", 100.0),
-    #     max_torque=env_cfg.get("max_torque", 50.0),
-    #     friction=env_cfg.get("friction", 0.5),
-    #     goal_thresh=env_cfg.get("goal_thresh", 0.1),
-    #     max_steps=env_cfg.get("max_steps", 100),
-    #     seed = seed,
-    #     segment_length= None
-    # )
-
     env = SimplePathFollowingEnv(**env_cfg)
 
     test_env_full_cfg = env_cfg.copy()
