@@ -199,20 +199,20 @@ class TD3:
         torch.save(self.actor.state_dict(), '%s/%s_actor.pth' % (directory, name))
         torch.save(self.actor_target.state_dict(), '%s/%s_actor_target.pth' % (directory, name))
         
-        torch.save(self.critic_1.state_dict(), '%s/%s_crtic_1.pth' % (directory, name))
+        torch.save(self.critic_1.state_dict(), '%s/%s_critic_1.pth' % (directory, name))
         torch.save(self.critic_1_target.state_dict(), '%s/%s_critic_1_target.pth' % (directory, name))
         
-        torch.save(self.critic_2.state_dict(), '%s/%s_crtic_2.pth' % (directory, name))
+        torch.save(self.critic_2.state_dict(), '%s/%s_critic_2.pth' % (directory, name))
         torch.save(self.critic_2_target.state_dict(), '%s/%s_critic_2_target.pth' % (directory, name))
         
     def load(self, directory, name):
         self.actor.load_state_dict(torch.load('%s/%s_actor.pth' % (directory, name), map_location=lambda storage, loc: storage))
         self.actor_target.load_state_dict(torch.load('%s/%s_actor_target.pth' % (directory, name), map_location=lambda storage, loc: storage))
         
-        self.critic_1.load_state_dict(torch.load('%s/%s_crtic_1.pth' % (directory, name), map_location=lambda storage, loc: storage))
+        self.critic_1.load_state_dict(torch.load('%s/%s_critic_1.pth' % (directory, name), map_location=lambda storage, loc: storage))
         self.critic_1_target.load_state_dict(torch.load('%s/%s_critic_1_target.pth' % (directory, name), map_location=lambda storage, loc: storage))
         
-        self.critic_2.load_state_dict(torch.load('%s/%s_crtic_2.pth' % (directory, name), map_location=lambda storage, loc: storage))
+        self.critic_2.load_state_dict(torch.load('%s/%s_critic_2.pth' % (directory, name), map_location=lambda storage, loc: storage))
         self.critic_2_target.load_state_dict(torch.load('%s/%s_critic_2_target.pth' % (directory, name), map_location=lambda storage, loc: storage))
         
         

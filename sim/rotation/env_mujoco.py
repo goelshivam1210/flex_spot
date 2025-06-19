@@ -32,6 +32,8 @@ class SimplePathFollowingEnv(gym.Env):
         self.max_torque = kwargs.get('max_torque', 50.0)
         self.goal_thresh = kwargs.get('goal_thresh', 0.2)
         self.max_steps = kwargs.get('max_steps', 500)
+        self.goal_pos = kwargs.get('goal_pos', None) 
+        self.friction = kwargs.get('friction', 0.2)
         self.goal_reward = kwargs.get('goal_reward', 100)
         self.segment_length = kwargs.get('segment_length', 0.3)
         self.test_full_arc = kwargs.get('test_full_arc', False)

@@ -6,9 +6,9 @@ import argparse
 
 import numpy as np
 import torch
-import gym
+import gymnasium as gym
 
-from env import SimplePathFollowingEnv
+from env_mujoco import SimplePathFollowingEnv
 from td3 import TD3, ReplayBuffer
 
 from torch.utils.tensorboard import SummaryWriter
@@ -27,10 +27,13 @@ def random_arc_generalization_test(env, agent, episodes=100):
         env.segment_length = None
         state, _ = env.reset()
         done = False
-        while not done:
-            action, = agent.select_action(np.array(state))
-            state, _, done, _, info = env.step(action)
-        successes += (info["progress"] > 0.95 and info["deviation"] < env.goal_thresh)
+        while True:
+            action = agent.select_action(np.array(state)).squeeze(0)
+            state, _, done, truncated, info = env.step(action)
+            if done or truncated:
+                if done and info["progress"] > 0.95 and info["deviation"] < env.goal_thresh:
+                    successes += 1
+                break
     return successes / episodes
 
 def test_policy(env, agent, num_episodes=20, render=False):
@@ -48,7 +51,6 @@ def test_policy(env, agent, num_episodes=20, render=False):
     """
     total_reward = 0
     successes = 0
-    total_steps = 0
     
     for ep in range(num_episodes):
         state, _ = env.reset()
@@ -56,24 +58,23 @@ def test_policy(env, agent, num_episodes=20, render=False):
         done = False
         ep_steps = 0
         
-        while not done and ep_steps < env.max_steps:
-            action = agent.select_action(np.array(state))
-            if action.ndim > 1:
-                action = action.squeeze(0)
-            
-            next_state, reward, done, _, info = env.step(action)
+        while True:
+            action = agent.select_action(np.array(state)).squeeze(0)            
+            next_state, reward, done, truncated, info = env.step(action)
             state = next_state
             ep_reward += reward
             ep_steps += 1
             
             if render:
                 env.render()
-        
-        # Check if the episode was successful
-        # This assumes the environment provides success info or we can infer it
-        # from the final state or reward
-        if done and info["progress"] > 0.95 and info["deviation"] < env.goal_thresh:
-            successes += 1
+            
+            if done or truncated:
+                # Check if the episode was successful
+                # This assumes the environment provides success info or we can infer it
+                # from the final state or reward
+                if done and info["progress"] > 0.95 and info["deviation"] < env.goal_thresh:
+                    successes += 1
+                break
         
         total_reward += ep_reward
     
@@ -129,39 +130,53 @@ def main():
     writer = SummaryWriter(logs_dir)
 
     # Create the environment for training
-    env = SimplePathFollowingEnv(
-        gui=env_cfg.get("gui", False),
-        max_force=env_cfg.get("max_force", 100.0),
-        max_torque=env_cfg.get("max_torque", 50.0),
-        friction=env_cfg.get("friction", 0.5),
-        goal_thresh=env_cfg.get("goal_thresh", 0.1),
-        max_steps=env_cfg.get("max_steps", 150),
-        seed = seed,
-        segment_length=env_cfg.get("segment_length", 0.3)
-    )
-    # Create a separate environment for testing small segments    
-    test_env_full = SimplePathFollowingEnv(
-        gui=args.render_test,  # Only use GUI if we're rendering test episodes
-        max_force=env_cfg.get("max_force", 100.0),
-        max_torque=env_cfg.get("max_torque", 50.0),
-        friction=env_cfg.get("friction", 0.5),
-        goal_thresh=env_cfg.get("goal_thresh", 0.1),
-        max_steps=env_cfg.get("max_steps", 1000),
-        seed = seed,
-        segment_length= env_cfg.get("segment_length", 0.3)
-    )
+    # env = SimplePathFollowingEnv(
+    #     gui=env_cfg.get("gui", False),
+    #     max_force=env_cfg.get("max_force", 100.0),
+    #     max_torque=env_cfg.get("max_torque", 50.0),
+    #     friction=env_cfg.get("friction", 0.5),
+    #     goal_thresh=env_cfg.get("goal_thresh", 0.1),
+    #     max_steps=env_cfg.get("max_steps", 150),
+    #     seed = seed,
+    #     segment_length=env_cfg.get("segment_length", 0.3)
+    # )
 
-    # Create a separate environment for testing arbitrary curves by stitching learned micro policies
-    test_env_short = SimplePathFollowingEnv(
-        gui=args.render_test,  # Only use GUI if we're rendering test episodes
-        max_force=env_cfg.get("max_force", 100.0),
-        max_torque=env_cfg.get("max_torque", 50.0),
-        friction=env_cfg.get("friction", 0.5),
-        goal_thresh=env_cfg.get("goal_thresh", 0.1),
-        max_steps=env_cfg.get("max_steps", 100),
-        seed = seed,
-        segment_length= None
-    )
+    # # Create a separate environment for testing small segments    
+    # test_env_full = SimplePathFollowingEnv(
+    #     gui=args.render_test,  # Only use GUI if we're rendering test episodes
+    #     max_force=env_cfg.get("max_force", 100.0),
+    #     max_torque=env_cfg.get("max_torque", 50.0),
+    #     friction=env_cfg.get("friction", 0.5),
+    #     goal_thresh=env_cfg.get("goal_thresh", 0.1),
+    #     max_steps=env_cfg.get("max_steps", 1000),
+    #     seed = seed,
+    #     segment_length= env_cfg.get("segment_length", 0.3)
+    # )
+
+    # # Create a separate environment for testing arbitrary curves by stitching learned micro policies
+    # test_env_short = SimplePathFollowingEnv(
+    #     gui=args.render_test,  # Only use GUI if we're rendering test episodes
+    #     max_force=env_cfg.get("max_force", 100.0),
+    #     max_torque=env_cfg.get("max_torque", 50.0),
+    #     friction=env_cfg.get("friction", 0.5),
+    #     goal_thresh=env_cfg.get("goal_thresh", 0.1),
+    #     max_steps=env_cfg.get("max_steps", 100),
+    #     seed = seed,
+    #     segment_length= None
+    # )
+
+    env = SimplePathFollowingEnv(**env_cfg)
+
+    test_env_full_cfg = env_cfg.copy()
+    test_env_full_cfg['gui'] = args.render_test
+    test_env_full_cfg['max_steps'] = 1000
+    test_env_full = SimplePathFollowingEnv(**test_env_full_cfg)
+
+    test_env_short_cfg = env_cfg.copy()
+    test_env_short_cfg['gui'] = args.render_test
+    test_env_short_cfg['segment_length'] = None
+    test_env_short = SimplePathFollowingEnv(**test_env_short_cfg)
+
 
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -199,7 +214,7 @@ def main():
         ep_steps = 0
 
         # Run one episode
-        while not done and ep_steps < env.max_steps:
+        while True:
             total_steps += 1
             ep_steps += 1
 
@@ -207,14 +222,14 @@ def main():
             if total_steps < start_timesteps:
                 action = env.action_space.sample()
             else:
-                action = agent.select_action(state)
-                if action.ndim > 1:
-                    action = action.squeeze(0)
+                action = agent.select_action(state).squeeze(0)
                 noise = np.random.normal(0, exploration_noise, size=action_dim)
                 action = np.clip(action + noise, env.action_space.low, env.action_space.high)
 
             # Step and store
-            next_state, reward, done, _, _ = env.step(action)
+            next_state, reward, done, truncated, _ = env.step(action)
+            episode_over = done or truncated
+
             replay_buffer.add((state, action, reward, next_state, float(done)))
             state = next_state
             ep_reward += reward
@@ -231,6 +246,9 @@ def main():
                     noise_clip,
                     policy_delay
                 )
+            
+            if episode_over:
+                break
 
         # Log training reward
         print(f"[Ep {ep:4d}] Train Reward: {ep_reward:.2f}")
@@ -281,9 +299,9 @@ def main():
     print(f"Random‐Arc Generalization (100 trials): Success Rate={gen_rate:.2f}")
 
     # Clean up
-    # env.close()
-    # test_env_short.close()
-    # test_env_full.close()
+    env.close()
+    test_env_short.close()
+    test_env_full.close()
     writer.close()
 
 if __name__ == "__main__":
