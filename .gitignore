@@ -79,3 +79,4 @@ models/
 .pytest_cache/
 /spot-sdk
 *.png
+*.jpg
