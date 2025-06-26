@@ -67,7 +67,7 @@ def fit_plane(points):
     d = -centroid.dot(normal)
     return normal, d
 
-class SpotController:
+class Spot:
     """Manages connectiion, state, and actions for a single robot."""
 
     def __init__(self, spot_id, hostname, config):
@@ -708,8 +708,8 @@ if __name__ == "__main__":
     config.depth_image_source = args.depth_image_source
 
     # Connect to Spot and capture image
-    controller = SpotController("Spot", args.hostname, config)
-    if not controller.connect():
+    spot = Spot("Spot", args.hostname, config)
+    if not spot.connect():
         print("Failed to connect to Spot.")
         exit(1)
 
@@ -717,28 +717,28 @@ if __name__ == "__main__":
     # for src in image_client.list_image_sources():
     #     print(src.name)
     
-    controller.setup_clients()
-    with LeaseKeepAlive(controller.lease_client, must_acquire=True, return_at_exit=True):
-        controller.stand_up()
+    spot.setup_clients()
+    with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
+        spot.stand_up()
         # controller.print_behavior_faults()
-        controller.open_gripper()
+        spot.open_gripper()
 
         # 1. Approach the box (using body camera, walk to target)
         # color_img, depth_img, image_data = controller.take_picture(return_proto=True)
         # print("Depth min/max:", np.min(depth_img), np.max(depth_img))
-        pt = controller.get_vertical_edge_grasp_point()
+        pt = spot.get_vertical_edge_grasp_point()
         # controller.walk_to_target((pt[0], pt[1]), image_data=image_data, offset_distance=1)
 
         # 2. Align normal using body camera and point cloud
         # controller.align_to_box_with_pointcloud(region=None, angle_threshold_deg=5)
 
         # 3. Switch to hand camera, grip
-        controller.grasp_at_edge()
+        spot.grasp_at_edge()
 
-        controller.open_gripper()
+        spot.open_gripper()
 
         # # 4. Push
-        controller.push_object()
+        spot.push_object()
 
         # img_result = controller.take_picture()
         # if img_result is None:

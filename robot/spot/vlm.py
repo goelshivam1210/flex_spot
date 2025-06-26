@@ -36,7 +36,7 @@ def detect_bounding_box(image_path, object_description):
 
     # Load image to determine dimensions
     img = cv2.imread(image_path)
-    
+
     h, w = img.shape[:2]
     print(f"Image dimensions: width={w}, height={h}")
 
