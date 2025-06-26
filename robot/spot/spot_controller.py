@@ -1,4 +1,4 @@
-"""Manages connectiion, state, and actions for a single robot."""
+"""Manages connectiion, state, and actions for a single spot robot."""
 import time
 import numpy as np
 
@@ -27,17 +27,6 @@ from bosdyn.client.robot_command import (
 from bosdyn.client.robot_state import RobotStateClient
 
 from google.protobuf import wrappers_pb2
-
-# === OpenAI and helper imports ===
-# import os
-# import base64
-# import json
-# import re
-
-# from openai import OpenAI
-
-# Initialize OpenAI client
-# client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def depth_to_point_cloud(depth_img, camera_model, region=None):
     # Assume depth in millimeters, shape [H,W]
@@ -685,73 +674,7 @@ class SpotController:
         #         print("Push command timed out.")
         #         break
         #     time.sleep(0.25)
-# # === GPT-4o bounding box helper and script ===
-# def detect_bounding_box(image):
-#     # Downscale image to reduce payload size
-#     # Function to encode the image
-#     def encode_image(image_path):
-#         with open(image_path, "rb") as image_file:
-#             return base64.b64encode(image_file.read()).decode("utf-8")
 
-#     # Path to your image
-#     image_path = "original_image.png"
-
-#     # Getting the Base64 string
-#     base64_image = encode_image(image_path)
-
-#     # Load image to determine dimensions
-#     img = cv2.imread(image_path)
-#     h, w = img.shape[:2]
-#     print(f"Image dimensions: width={w}, height={h}")
-
-
-#     prompt_text = (
-#         f"The image is {w} pixels wide and {h} pixels tall. "
-#         "There is a light colored wooden box with woodgrain texture in the bottom part of the image. Return the bounding box coordinates [x1, y1, x2, y2] of the vertical edge on the right side of the wooden partition or panel in the foreground of the image, in pixel coordinate space."
-#     )
-
-#     response = client.responses.create(
-#         model="gpt-4.1",
-#         input=[
-#             {"role": "system",
-#             "content": (
-#                 "You are an assistant that only returns JSON. "
-#                 "Given an image embed, you MUST output exactly "
-#                 "one JSON array [x1,y1,x2,y2], nothing else."
-#             )},
-#             {
-#                 "role": "user",
-#                 "content": [
-#                     {
-#                         "type": "input_text",
-#                         "text": prompt_text
-#                     },
-#                     {
-#                         "type": "input_image",
-#                         "image_url": f"data:image/jpeg;base64,{base64_image}",
-#                     },
-#                 ],
-#             }
-#         ],
-#     )
-
-#     print(f"OpenAI API response {response.output_text}")
-
-#     # Parse JSON bounding box coordinates
-#     content = response.output_text.strip()
-#     # Extract JSON array from descriptive text
-#     match = re.search(r'\[.*?\]', content)
-#     if not match:
-#         raise RuntimeError(f"Could not find bounding box JSON in response: {content}")
-#     coords = json.loads(match.group(0))
-#     x1, y1, x2, y2 = coords
-
-#     # Load original image, draw box, and save annotated image
-#     img = cv2.imread(image_path)
-#     cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-#     annotated_path = "annotated_image.png"
-#     cv2.imwrite(annotated_path, img)
-#     print(f"Saved annotated image to {annotated_path}")
 
 if __name__ == "__main__":
     import argparse
