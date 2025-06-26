@@ -12,11 +12,9 @@ from bosdyn.api import(
     robot_command_pb2
 )
 
-import bosdyn.client
 from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME
 from bosdyn.client.image import ImageClient
-from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
-from bosdyn.client.manipulation_api_client import ManipulationApiClient
+from bosdyn.client.lease import LeaseKeepAlive
 from bosdyn.client.math_helpers import SE3Pose, Quat
 from bosdyn.client.robot_command import (
   RobotCommandBuilder,
@@ -27,6 +25,9 @@ from bosdyn.client.robot_command import (
 from bosdyn.client.robot_state import RobotStateClient
 
 from google.protobuf import wrappers_pb2
+
+from spot_client import SpotClient
+
 
 def depth_to_point_cloud(depth_img, camera_model, region=None):
     # Assume depth in millimeters, shape [H,W]
@@ -68,46 +69,25 @@ def fit_plane(points):
     return normal, d
 
 class Spot:
-    """Manages connectiion, state, and actions for a single robot."""
+    """Manages connection, state, and actions for a single robot."""
 
-    def __init__(self, spot_id, hostname, config):
-        self.spot_id = spot_id
-        self.hostname = hostname
+    def __init__(self, id, hostname, config):
+        self.id = id
+        self._client = SpotClient(id, hostname)
         self.config = config
-
-        self._sdk = None
-        self._spot = None        
-        self.lease_client = None
-        self._manip_client = None
-        self._command_client = None
 
         self.target_point = None
         self.image_data = None
 
-    # Helper function to setup clients
-    def setup_clients(self):
-        """
-        Initialize lease and manipulation API clients on self.
-        """
-        self.lease_client = self._spot.ensure_client(LeaseClient.default_service_name)
-        self._manip_client = self._spot.ensure_client(ManipulationApiClient.default_service_name)
-        self._command_client = self._spot.ensure_client(RobotCommandClient.default_service_name)
+    @property
+    def lease_client(self):
+        return self._client._lease_client
+    
+    def start(self):
+        return self._client.start()
 
-    def connect(self):
-        """Connects to the robot and authenticates."""
-        try:
-            self._sdk = bosdyn.client.create_standard_sdk(
-                f'Controller_{self.spot_id}'
-            )
-            self._spot = self._sdk.create_robot(self.hostname)
-            bosdyn.client.util.authenticate(self._spot)
-            self._spot.time_sync.wait_for_sync()
-            print(f"{self.spot_id}: Connection successful.")
-            return True
-        except Exception as e:
-            print(f"{self.spot_id}: Failed to connect - {e}")
-            return False            
-
+    def power_on(self):
+        return self._client.power_on()
 
     def get_target_from_user(self):
         """
@@ -125,7 +105,6 @@ class Spot:
         cv2.setMouseCallback(
             image_title, self._get_target_point, param=(self.spot_id, img_data)
         )
-
 
     def take_picture(self, return_proto=False):
         """
@@ -199,7 +178,6 @@ class Spot:
                 return (cv_image, image_responses[0])
             return cv_image
 
-
     def decode_image(self, image, source_name=None):
         """
         Decodes the image data from the robot.
@@ -229,13 +207,8 @@ class Spot:
         """
         Power on the robot and command it to stand.
         """
-        # Power on
-        self._spot.power_on(timeout_sec=20)
-        assert self._spot.is_powered_on(), "Power on failed."
-        # Stand
-        command_client = self._spot.ensure_client(RobotCommandClient.default_service_name)
-        blocking_stand(command_client, timeout_sec=timeout_sec)
-        print(f"Robot {self.spot_id}: Standing complete.")
+        blocking_stand(self._client._command_client, timeout_sec=timeout_sec)
+        print(f"{self.id}: Standing complete.")
 
     def walk_to_target(self, pixel_xy: tuple, image_data, offset_distance: float = None):
         """
@@ -351,7 +324,6 @@ class Spot:
             for fault in faults:
                 # Print full protobuf representation for each fault
                 print(f"  - {fault}")
-
 
     def find_strongest_vertical_edge(self, cv_image):
         # Preprocess (convert to grayscale, blur, etc.)
@@ -707,38 +679,32 @@ if __name__ == "__main__":
     config.image_source = args.image_source
     config.depth_image_source = args.depth_image_source
 
-    # Connect to Spot and capture image
-    spot = Spot("Spot", args.hostname, config)
-    if not spot.connect():
-        print("Failed to connect to Spot.")
-        exit(1)
+    spot = Spot(id="Spot", hostname=args.hostname, config=config)
 
-    # image_client = controller._spot.ensure_client(ImageClient.default_service_name)
-    # for src in image_client.list_image_sources():
-    #     print(src.name)
-    
-    spot.setup_clients()
+    spot.start()
+
     with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
+        spot.power_on()
         spot.stand_up()
         # controller.print_behavior_faults()
-        spot.open_gripper()
+        # spot.open_gripper()
 
         # 1. Approach the box (using body camera, walk to target)
         # color_img, depth_img, image_data = controller.take_picture(return_proto=True)
         # print("Depth min/max:", np.min(depth_img), np.max(depth_img))
-        pt = spot.get_vertical_edge_grasp_point()
+        # pt = spot.get_vertical_edge_grasp_point()
         # controller.walk_to_target((pt[0], pt[1]), image_data=image_data, offset_distance=1)
 
         # 2. Align normal using body camera and point cloud
         # controller.align_to_box_with_pointcloud(region=None, angle_threshold_deg=5)
 
         # 3. Switch to hand camera, grip
-        spot.grasp_at_edge()
+        # spot.grasp_at_edge()
 
-        spot.open_gripper()
+        # spot.open_gripper()
 
         # # 4. Push
-        spot.push_object()
+        # spot.push_object()
 
         # img_result = controller.take_picture()
         # if img_result is None:
