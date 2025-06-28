@@ -20,7 +20,7 @@ class SpotCamera:
         self.id = id
         self._spot_client = spot_client
 
-    def take_picture(self, color_source: str = None, depth_source: str = None,
+    def take_picture(self, color_src: str = None, depth_src: str = None,
                      save_images: bool = False):
         """
         Takes a picture with the robot's camera.
@@ -37,11 +37,11 @@ class SpotCamera:
 
         sources = []
         order = []
-        if color_source:
-            sources.append(color_source)
+        if color_src:
+            sources.append(color_src)
             order.append("color")
-        if depth_source:
-            sources.append(depth_source)
+        if depth_src:
+            sources.append(depth_src)
             order.append("depth")
 
         if not sources:
@@ -102,7 +102,7 @@ class SpotCamera:
         return cv_image
 
     @staticmethod
-    def save_image(image, out_path):
+    def save_image(image, out_path) -> None:
         """
         Saves an image to disk.
         Args:
@@ -114,7 +114,7 @@ class SpotCamera:
 
     @staticmethod
     def save_color_depth_overlay(color_img, depth_img, 
-                                 out_path="images/color_and_depth.jpg"):
+                                 out_path="images/color_and_depth.jpg") -> None:
         """
         Creates and saves an RGB+depth overlay.
         Args:
