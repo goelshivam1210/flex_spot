@@ -80,3 +80,5 @@ models/
 /spot-sdk
 *.png
 *.jpg
+
+robot/images

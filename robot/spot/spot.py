@@ -27,6 +27,7 @@ from bosdyn.client.robot_state import RobotStateClient
 from google.protobuf import wrappers_pb2
 
 from spot_client import SpotClient
+from spot_camera import SpotCamera
 
 
 def depth_to_point_cloud(depth_img, camera_model, region=None):
@@ -73,8 +74,10 @@ class Spot:
 
     def __init__(self, id, hostname, config):
         self.id = id
-        self._client = SpotClient(id, hostname)
         self.config = config
+
+        self._client = SpotClient(id, hostname)
+        self._camera = SpotCamera(id, self._client)
 
         self.target_point = None
         self.image_data = None
@@ -105,103 +108,6 @@ class Spot:
         cv2.setMouseCallback(
             image_title, self._get_target_point, param=(self.spot_id, img_data)
         )
-
-    def take_picture(self, return_proto=False):
-        """
-        Takes a picture with the robot's camera.
-        Returns:
-            If depth image source is configured, returns (cv_image, depth_image).
-            Otherwise, returns just the color image.
-        """
-        # Ensure we have a client
-        if not self._spot:
-            print(f"{self.spot_id}: Not connected. Cannot get image.")
-            return None
-
-        image_client = self._spot.ensure_client(
-            ImageClient.default_service_name
-        )
-        image_source = self.config.image_source
-        depth_image_source = getattr(self.config, "depth_image_source", None)
-
-        # sources = [image_source]
-        # if depth_image_source:
-        #     sources.append(depth_image_source)
-
-        sources = [depth_image_source, image_source]
-
-        print(f'Robot {self.spot_id}: Getting image(s) from: {sources}')
-        image_responses = image_client.get_image_from_sources(sources)
-
-        if len(image_responses) != len(sources):
-            print(f'Robot {self.spot_id}: Got {len(image_responses)} images, expected {len(sources)}.')
-            return None
-        
-        # Depth is a raw bytestream
-        cv_depth = np.frombuffer(image_responses[0].shot.image.data, dtype=np.uint16)
-        cv_depth = cv_depth.reshape(image_responses[0].shot.image.rows,
-                                    image_responses[0].shot.image.cols)
-
-        # Visual is a JPEG
-        cv_visual = cv2.imdecode(np.frombuffer(image_responses[1].shot.image.data, dtype=np.uint8), -1)
-
-        # Convert the visual image from a single channel to RGB so we can add color
-        visual_rgb = cv_visual if len(cv_visual.shape) == 3 else cv2.cvtColor(
-            cv_visual, cv2.COLOR_GRAY2RGB)
-
-        # Map depth ranges to color
-
-        # cv2.applyColorMap() only supports 8-bit; convert from 16-bit to 8-bit and do scaling
-        min_val = np.min(cv_depth)
-        max_val = np.max(cv_depth)
-        depth_range = max_val - min_val
-        depth8 = (255.0 / depth_range * (cv_depth - min_val)).astype('uint8')
-        depth8_rgb = cv2.cvtColor(depth8, cv2.COLOR_GRAY2RGB)
-        depth_color = cv2.applyColorMap(depth8_rgb, cv2.COLORMAP_JET)
-
-        # Add the two images together.
-        out = cv2.addWeighted(visual_rgb, 0.5, depth_color, 0.5, 0)
-        cv2.imwrite("color_and_depth.jpg", out)
-
-        cv_image = self.decode_image(image_responses[1].shot.image)
-        cv2.imwrite("original_image.png", cv_image)
-        print("Saved depth image to original_image.png")
-        if depth_image_source:
-            depth_image = self.decode_image(image_responses[0].shot.image)
-            cv2.imwrite("original_depth.png", depth_image)
-            print("Saved depth image to original_depth.png")
-            if return_proto:
-                return (cv_image, depth_image, image_responses[0])
-            return (cv_image, depth_image)
-        else:
-            if return_proto:
-                return (cv_image, image_responses[0])
-            return cv_image
-
-    def decode_image(self, image, source_name=None):
-        """
-        Decodes the image data from the robot.
-        Args:
-            image (image_pb2.Image): The image data from the robot.
-        Returns:
-            cv_image: The decoded image in OpenCV format.
-        """
-        if image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
-            dtype = np.uint16
-        else:
-            dtype = np.uint8
-
-        img_data = np.frombuffer(image.data, dtype=dtype)
-        if image.format == image_pb2.Image.FORMAT_RAW:
-            cv_image = img_data.reshape((image.rows, image.cols))
-        else:
-            cv_image = cv2.imdecode(img_data, -1)
-
-        # if source_name in ["frontleft_fisheye_image", "frontright_fisheye_image"]:
-        #     # Most Spot fisheye images are rotated 90 deg counterclockwise
-        #     cv_image = np.rot90(cv_image, k=1)
-
-        return cv_image
 
     def stand_up(self, timeout_sec: float = 10):
         """
@@ -248,15 +154,12 @@ class Spot:
         """
         Open Spot's gripper using a claw command.
         """
-        # Ensure command client is initialized
-        if not self._command_client:
-            self.setup_clients()
         # Build and send gripper open command
         gripper_cmd = RobotCommandBuilder.claw_gripper_open_command()
-        cmd_id = self._command_client.robot_command(gripper_cmd)
+        cmd_id = self._client._command_client.robot_command(gripper_cmd)
         # Wait until the gripper command completes
         block_until_arm_arrives(self._command_client, cmd_id, timeout_sec=timeout_sec)
-        print(f"Robot {self.spot_id}: Gripper open complete.")
+        print(f"Robot {self.id}: Gripper open complete.")
 
     def align_to_box_with_pointcloud(self, region=None, angle_threshold_deg=5):
         """
@@ -307,7 +210,6 @@ class Spot:
             time.sleep(1.0)
         print("Failed to align after several attempts.")
         return False
-
 
     def print_behavior_faults(self):
         """
@@ -686,8 +588,7 @@ if __name__ == "__main__":
     with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
         spot.power_on()
         spot.stand_up()
-        # controller.print_behavior_faults()
-        # spot.open_gripper()
+        spot.open_gripper()
 
         # 1. Approach the box (using body camera, walk to target)
         # color_img, depth_img, image_data = controller.take_picture(return_proto=True)
