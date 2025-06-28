@@ -10,6 +10,7 @@ from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandClient
+from bosdyn.client.robot_state import RobotStateClient
 
 class SpotClient:
     """
@@ -26,6 +27,7 @@ class SpotClient:
         self._image_client = None
         self._lease_client = None
         self._manip_client = None
+        self._state_client = None
 
     @property
     def spot_robot(self):
@@ -66,6 +68,7 @@ class SpotClient:
         self._image_client = self._spot.ensure_client(ImageClient.default_service_name)
         self._lease_client = self._spot.ensure_client(LeaseClient.default_service_name)
         self._manip_client = self._spot.ensure_client(ManipulationApiClient.default_service_name)
+        self._state_client = self._spot.ensure_client(RobotStateClient.default_service_name)
         print(f"{self.id}: Set up clients")
 
     def power_on(self, timeout_sec=20):
@@ -75,3 +78,16 @@ class SpotClient:
         self._spot.power_on(timeout_sec=timeout_sec)
         assert self._spot.is_powered_on(), "Power on failed."
         print(f"{self.id}: Powered on")
+
+    def print_behavior_faults(self):
+        """
+        Retrieve and print current behavior faults from Spot.
+        """
+        state = self._state_client.get_robot_state()
+        faults = state.behavior_fault_state.faults
+        if not faults:
+            print(f"{self.id}: No behavior faults.")
+        else:
+            print(f"Robot {self.id}: Current behavior faults:")
+            for fault in faults:
+                print(f"  - {fault}")
