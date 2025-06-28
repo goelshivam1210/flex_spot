@@ -1,7 +1,14 @@
-"""Manages connectiion, state, and actions for a single spot robot."""
+"""
+spot.py
+
+Manages connectiion, state, and actions for a single spot robot.
+
+Author: Tim
+Date: June 2025
+"""
+
 import time
 import numpy as np
-
 import cv2
 
 from bosdyn.api import(
@@ -11,7 +18,6 @@ from bosdyn.api import(
     manipulation_api_pb2,
     robot_command_pb2
 )
-
 from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME
 from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseKeepAlive
@@ -23,51 +29,11 @@ from bosdyn.client.robot_command import (
   block_until_arm_arrives
 )
 from bosdyn.client.robot_state import RobotStateClient
-
 from google.protobuf import wrappers_pb2
 
 from spot_client import SpotClient
 from spot_camera import SpotCamera
-
-
-def depth_to_point_cloud(depth_img, camera_model, region=None):
-    # Assume depth in millimeters, shape [H,W]
-    if region:
-        x1, y1, x2, y2 = region
-        depth_crop = depth_img[y1:y2, x1:x2]
-        xs, ys = np.meshgrid(np.arange(x1, x2), np.arange(y1, y2))
-    else:
-        h, w = depth_img.shape
-        depth_crop = depth_img
-        xs, ys = np.meshgrid(np.arange(w), np.arange(h))
-    depths = depth_crop.flatten().astype(np.float32) / 1000.0  # mm to meters
-    xs = xs.flatten()
-    ys = ys.flatten()
-    # Camera intrinsics
-    fx = camera_model.intrinsics.focal_length.x
-    fy = camera_model.intrinsics.focal_length.y
-    cx = camera_model.intrinsics.principal_point.x
-    cy = camera_model.intrinsics.principal_point.y
-    X = (xs - cx) * depths / fx
-    Y = (ys - cy) * depths / fy
-    Z = depths
-    points = np.stack([X, Y, Z], axis=1)
-    return points
-
-def fit_plane(points):
-    """Fit a plane to points using least squares. Returns (normal, offset)."""
-    valid = ~np.isnan(points).any(axis=1) & (points[:,2] > 0.2) & (points[:,2] < 3.0)  # filter valid range
-    pts = points[valid]
-    if pts.shape[0] < 10:
-        return None, None
-    # Fit plane to points: Ax + By + Cz + D = 0
-    centroid = pts.mean(axis=0)
-    pts_centered = pts - centroid
-    U, S, Vt = np.linalg.svd(pts_centered)
-    normal = Vt[-1]
-    normal /= np.linalg.norm(normal)
-    d = -centroid.dot(normal)
-    return normal, d
+from spot_perception import SpotPerception
 
 class Spot:
     """Manages connection, state, and actions for a single robot."""
@@ -91,23 +57,10 @@ class Spot:
 
     def power_on(self):
         return self._client.power_on()
-
-    def get_target_from_user(self):
-        """
-        Displays an image from the robot's camera and waits for user to
-        click on a target.
-        """
-        cv_image = self.take_picture()
-        # Create a dictionary to hold state for the callback, avoiding globals.
-        callback_data = {'clicked_point': None, 'display_image': cv_image}
-
-        # Show image and wait for click
-        print(f'Robot {self.spot_id}: Click on an object to walk up to...')
-        image_title = 'Click to walk up to target'
-        cv2.namedWindow(image_title)
-        cv2.setMouseCallback(
-            image_title, self._get_target_point, param=(self.spot_id, img_data)
-        )
+    
+    def take_picture(self, color_src:str=None, depth_src:str=None,
+                     save_images:bool=False):
+        return self._camera.take_picture(color_src, depth_src, save_images)
 
     def stand_up(self, timeout_sec: float = 10):
         """
@@ -116,40 +69,6 @@ class Spot:
         blocking_stand(self._client._command_client, timeout_sec=timeout_sec)
         print(f"{self.id}: Standing complete.")
 
-    def walk_to_target(self, pixel_xy: tuple, image_data, offset_distance: float = None):
-        """
-        Walk to a target specified in pixel coordinates from an image.
-        Args:
-            pixel_xy: (x, y) tuple in pixel coordinates.
-            image_data: ImageResponse returned by take_picture.
-            offset_distance: optional float distance in meters to stop before target.
-        """
-        # Ensure manipulation client is initialized
-        if not hasattr(self, 'manip_client'):
-            self.setup_clients()
-        # Build Vec2 and optional offset
-        walk_vec = geometry_pb2.Vec2(x=pixel_xy[0], y=pixel_xy[1])
-        od = None if offset_distance is None else wrappers_pb2.FloatValue(value=offset_distance)
-        walk_to = manipulation_api_pb2.WalkToObjectInImage(
-            pixel_xy=walk_vec,
-            transforms_snapshot_for_camera=image_data.shot.transforms_snapshot,
-            frame_name_image_sensor=image_data.shot.frame_name_image_sensor,
-            camera_model=image_data.source.pinhole,
-            offset_distance=od
-        )
-        request = manipulation_api_pb2.ManipulationApiRequest(walk_to_object_in_image=walk_to)
-        response = self._manip_client.manipulation_api_command(manipulation_api_request=request)
-        # Wait for completion
-        while True:
-            time.sleep(0.25)
-            fb_req = manipulation_api_pb2.ManipulationApiFeedbackRequest(
-                manipulation_cmd_id=response.manipulation_cmd_id)
-            fb_resp = self._manip_client.manipulation_api_feedback_command(
-                manipulation_api_feedback_request=fb_req)
-            if fb_resp.current_state == manipulation_api_pb2.MANIP_STATE_DONE:
-                print(f"Robot {self.spot_id}: Reached target.")
-                break
-
     def open_gripper(self, timeout_sec: float = 5.0):
         """
         Open Spot's gripper using a claw command.
@@ -157,9 +76,10 @@ class Spot:
         # Build and send gripper open command
         gripper_cmd = RobotCommandBuilder.claw_gripper_open_command()
         cmd_id = self._client._command_client.robot_command(gripper_cmd)
+        
         # Wait until the gripper command completes
         block_until_arm_arrives(self._command_client, cmd_id, timeout_sec=timeout_sec)
-        print(f"Robot {self.id}: Gripper open complete.")
+        print(f"{self.id}: Gripper open complete.")
 
     def align_to_box_with_pointcloud(self, region=None, angle_threshold_deg=5):
         """
@@ -210,186 +130,8 @@ class Spot:
             time.sleep(1.0)
         print("Failed to align after several attempts.")
         return False
-
-    def print_behavior_faults(self):
-        """
-        Retrieve and print current behavior faults from Spot.
-        """
-        # Ensure state client is available
-        state_client = self._spot.ensure_client(RobotStateClient.default_service_name)
-        state = state_client.get_robot_state()
-        faults = state.behavior_fault_state.faults
-        if not faults:
-            print(f"Robot {self.spot_id}: No behavior faults.")
-        else:
-            print(f"Robot {self.spot_id}: Current behavior faults:")
-            for fault in faults:
-                # Print full protobuf representation for each fault
-                print(f"  - {fault}")
-
-    def find_strongest_vertical_edge(self, cv_image):
-        # Preprocess (convert to grayscale, blur, etc.)
-        if len(cv_image.shape) == 3 and cv_image.shape[2] == 3:
-            gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = cv_image.copy()        
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blur, 50, 150, apertureSize=3)
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50,minLineLength=50, maxLineGap=10)
-        best_line = None
-        best_score = -np.inf
-        h = cv_image.shape[0]
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                dx = abs(x2 - x1)
-                dy = abs(y2 - y1)
-                length = np.hypot(dx, dy)
-                # Check if vertical enough
-                if dx < dy and length > 30:
-                    # Score: longer, and closer to bottom of image (foreground)
-                    avg_y = (y1 + y2) / 2
-                    score = avg_y + 2 * length  # Heavily favor lines lower in image
-                    if score > best_score:
-                        best_score = score
-                        best_line = (x1, y1, x2, y2)
-        return best_line
-
-    def grasp_vertical_edge(self):
-        img = self.take_picture()
-        if img is None:
-            print("Failed to capture image.")
-            return
-        line = self.find_strongest_vertical_edge(img)
-        if not line:
-            print("No strong vertical edge found.")
-            return
-        # Pick the midpoint of the line as the grasp point
-        x1, y1, x2, y2 = line
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-
-        print(f"Attempting grasp at pixel ({cx}, {cy})")
-
-        # Optionally, use depth here to get z
-        # If you want to walk to the object:
-        # self.walk_to_target((cx, cy), img_data=image_data_from_take_picture)
-
-        # Move the arm to the edge (using manipulation API, or a simple arm pose)
-        # Here, for demo, just open the gripper first:
-        self.open_gripper()
-        #TODO: Add code to move arm to the pose, then close gripper
-        # This is where you'd use the Manipulation API to send a grasp command at (cx, cy)
-
-    def get_depth_at_pixel(self, depth_image, cx, cy, search_radius=5):
-        """
-        Returns a valid depth value and pixel position near (cx, cy) in the depth image.
-        Args:
-            depth_image (np.ndarray): Depth image (uint16 or float32).
-            cx, cy (int): Pixel coordinates.
-            search_radius (int): Radius in pixels to search for a valid depth.
-        Returns:
-            (depth_value, px, py): depth in meters (float), pixel x, y. If not found, returns (None, None, None).
-        """
-        h, w = depth_image.shape[:2]
-        # Try the center pixel first
-        if 0 <= cx < w and 0 <= cy < h:
-            d = depth_image[cy, cx]
-            if np.isfinite(d) and d > 0:
-                return (float(d) / 1000.0 if depth_image.dtype == np.uint16 else float(d), cx, cy)
-        # Search in a small window for a valid depth
-        for r in range(1, search_radius + 1):
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    px = cx + dx
-                    py = cy + dy
-                    if 0 <= px < w and 0 <= py < h:
-                        d = depth_image[py, px]
-                        if np.isfinite(d) and d > 0:
-                            return (float(d) / 1000.0 if depth_image.dtype == np.uint16 else float(d), px, py)
-        return (None, None, None)
-
-    def pixel_to_camera_frame(self, u, v, depth, camera_model):
-        """
-        Convert image pixel (u, v) and depth to camera frame 3D point using pinhole intrinsics.
-        Args:
-            u, v: Pixel coordinates.
-            depth: Depth in meters.
-            camera_model: image_pb2.ImageSource.pinhole (PinholeCameraModel).
-        Returns:
-            (x, y, z): 3D point in camera frame.
-        """
-        # camera_model contains focal_length, center_x, center_y
-        fx = camera_model.intrinsics.focal_length.x
-        fy = camera_model.intrinsics.focal_length.y
-        cx = camera_model.intrinsics.principal_point.x
-        cy = camera_model.intrinsics.principal_point.y
-        # Unproject
-        x = (u - cx) * depth / fx
-        y = (v - cy) * depth / fy
-        z = depth
-        return (x, y, z)
-
-    def get_vertical_edge_grasp_point(self):
-        """
-        Detects the strongest vertical edge, finds a valid depth at/near its midpoint,
-        draws the edge and target pixel on the color image, saves to disk, and returns the 3D grasp point in camera frame
-        as (x, y, z) in meters if depth is available, else (cx, cy, None) where cx,cy are the target pixel coordinates.
-        Always saves the grasp visualization image.
-        Returns:
-            (x, y, z): 3D grasp point in camera frame if depth available, else (cx, cy, None).
-        """
-        # 1. Capture color and depth image
-        img_result = self.take_picture()
-        if img_result is None or not isinstance(img_result, tuple):
-            print("Failed to capture color and depth images.")
-            return None
-        color_img, depth_img = img_result
-        
-        # 2. Find strongest vertical edge
-        line = self.find_strongest_vertical_edge(color_img)
-        if not line:
-            print("No strong vertical edge found.")
-            return None
-        x1, y1, x2, y2 = line
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-        # 3. Look up valid depth at or near (cx, cy)
-        depth, px, py = self.get_depth_at_pixel(depth_img, cx, cy, search_radius=5)
-        # 4. Draw detected edge and pixel on color image and save
-        color_img_mark = color_img.copy()
-        # Draw the detected vertical edge as a green line
-        cv2.line(color_img_mark, (x1, y1), (x2, y2), (0, 255, 0), 3)
-        # Draw the grasp pixel (red dot). If valid depth found, use (px,py), else use (cx,cy)
-        if depth is not None:
-            cv2.circle(color_img_mark, (px, py), 6, (0, 0, 255), -1)
-        else:
-            cv2.circle(color_img_mark, (cx, cy), 6, (0, 0, 255), -1)
-        cv2.imwrite("edge_and_depth_pixel.png", color_img_mark)
-        print(f"Saved edge and grasp pixel visualization to edge_and_depth_pixel.png")
-        # 5. Retrieve camera model from Spot's API
-        image_client = self._spot.ensure_client(ImageClient.default_service_name)
-        image_source = self.config.image_source
-        # Get image source info to get camera intrinsics
-        sources = image_client.list_image_sources()
-        camera_model = None
-        for src in sources:
-            if src.name == image_source:
-                camera_model = src.pinhole
-                break
-        if camera_model is None:
-            print("Could not retrieve camera intrinsics for image source.")
-            return None
-        # 6. Compute (x, y, z) grasp point in camera frame if depth available, else return pixel coords and None
-        if depth is not None:
-            grasp_point = self.pixel_to_camera_frame(px, py, depth, camera_model)
-            print(f"Detected grasp point in camera frame: {grasp_point}")
-            return grasp_point
-        else:
-            print("No valid depth at or near edge midpoint. Returning pixel coordinates and None for depth.")
-            return (cx, cy, None)
-
-    def grasp_at_edge(self):
+       
+    def grasp_edge(self):
         """
         Uses the Spot Manipulation API to grasp at the vertical edge detected in the color image.
         """
@@ -469,7 +211,6 @@ class Spot:
                 print(f"Robot {self.spot_id}: Grasp feedback timed out after {max_wait} seconds.")
                 break
         return True
-
 
     def push_object(self, dx=1, dy=0.5, distance=0.3, speed=0.2):
         """
@@ -581,6 +322,9 @@ if __name__ == "__main__":
     config.image_source = args.image_source
     config.depth_image_source = args.depth_image_source
 
+    hand_img_src = "hand_color_image"
+    hand_depth_src = "hand_depth_in_hand_color_frame"
+
     spot = Spot(id="Spot", hostname=args.hostname, config=config)
 
     spot.start()
@@ -588,47 +332,59 @@ if __name__ == "__main__":
     with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
         spot.power_on()
         spot.stand_up()
+
+        # 1. Take picture of box and get grasp point
         spot.open_gripper()
+        color_img, depth_img = spot.take_picture(
+            color_src=hand_img_src,
+            depth_src=hand_depth_src,
+            save_images=True
+        )
+        grasp_pt = SpotPerception.get_vertical_edge_grasp_point(
+            color_img, depth_img, spot.id
+        )
 
-        # 1. Approach the box (using body camera, walk to target)
-        # color_img, depth_img, image_data = controller.take_picture(return_proto=True)
-        # print("Depth min/max:", np.min(depth_img), np.max(depth_img))
-        # pt = spot.get_vertical_edge_grasp_point()
-        # controller.walk_to_target((pt[0], pt[1]), image_data=image_data, offset_distance=1)
+        # 2. Grasp edge
+        spot.grasp_edge()
+        spot.open_gripper()  # Keep gripper open to prevent losing grip
 
-        # 2. Align normal using body camera and point cloud
-        # controller.align_to_box_with_pointcloud(region=None, angle_threshold_deg=5)
+        # 3. Push box
+        spot.push_object()
 
-        # 3. Switch to hand camera, grip
-        # spot.grasp_at_edge()
+##############
+# Old Code
+##############
 
-        # spot.open_gripper()
-
-        # # 4. Push
-        # spot.push_object()
-
-        # img_result = controller.take_picture()
-        # if img_result is None:
-        #     print("Failed to capture image.")
-        #     exit(1)
-
-        # pt = controller.get_vertical_edge_grasp_point()
-        # if pt is not None:
-        #     print("Grasp point (camera frame):", pt)
-
-        # controller.grasp_at_edge()
-
-        # controller.push_object()
-
-    # Save original capture(s) for debugging
-    # if isinstance(img_result, tuple):
-    #     color_img, depth_img = img_result
-    #     cv2.imwrite("original_image.png", color_img)
-    #     cv2.imwrite("original_depth.png", depth_img)
-    #     print("Saved original image to original_image.png")
-    #     print("Saved depth image to original_depth.png")
-    # else:
-    #     cv2.imwrite("original_image.png", img_result)
-    #     print("Saved original image to original_image.png")
-
-    # detect_bounding_box(img)
+    # def walk_to_target(self, pixel_xy: tuple, image_data, offset_distance: float = None):
+    #     """
+    #     Walk to a target specified in pixel coordinates from an image.
+    #     Args:
+    #         pixel_xy: (x, y) tuple in pixel coordinates.
+    #         image_data: ImageResponse returned by take_picture.
+    #         offset_distance: optional float distance in meters to stop before target.
+    #     """
+    #     # Ensure manipulation client is initialized
+    #     if not hasattr(self, 'manip_client'):
+    #         self.setup_clients()
+    #     # Build Vec2 and optional offset
+    #     walk_vec = geometry_pb2.Vec2(x=pixel_xy[0], y=pixel_xy[1])
+    #     od = None if offset_distance is None else wrappers_pb2.FloatValue(value=offset_distance)
+    #     walk_to = manipulation_api_pb2.WalkToObjectInImage(
+    #         pixel_xy=walk_vec,
+    #         transforms_snapshot_for_camera=image_data.shot.transforms_snapshot,
+    #         frame_name_image_sensor=image_data.shot.frame_name_image_sensor,
+    #         camera_model=image_data.source.pinhole,
+    #         offset_distance=od
+    #     )
+    #     request = manipulation_api_pb2.ManipulationApiRequest(walk_to_object_in_image=walk_to)
+    #     response = self._manip_client.manipulation_api_command(manipulation_api_request=request)
+    #     # Wait for completion
+    #     while True:
+    #         time.sleep(0.25)
+    #         fb_req = manipulation_api_pb2.ManipulationApiFeedbackRequest(
+    #             manipulation_cmd_id=response.manipulation_cmd_id)
+    #         fb_resp = self._manip_client.manipulation_api_feedback_command(
+    #             manipulation_api_feedback_request=fb_req)
+    #         if fb_resp.current_state == manipulation_api_pb2.MANIP_STATE_DONE:
+    #             print(f"Robot {self.spot_id}: Reached target.")
+    #             break
