@@ -10,6 +10,8 @@ Date: June 27, 2025
 import numpy as np
 import cv2
 
+g_image_click = None
+g_image_display = None
 class SpotPerception:
     """
     Contains computer vision and geometric helper functions for Spot.
@@ -17,7 +19,7 @@ class SpotPerception:
     """
 
     @staticmethod
-    def find_strongest_vertical_edge(cv_image):
+    def find_strongest_vertical_edge(cv_img, depth_img):
         """
         Finds the strongest vertical edge in the input image.
 
@@ -29,10 +31,10 @@ class SpotPerception:
         #TODO Update to help the robots know if they are left or right edge
         #TODO Use depth to help figure out what edges are the box
         """
-        if len(cv_image.shape) == 3 and cv_image.shape[2] == 3:
-            gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        if len(cv_img.shape) == 3 and cv_img.shape[2] == 3:
+            gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
         else:
-            gray = cv_image.copy()        
+            gray = cv_img.copy()        
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(blur, 50, 150, apertureSize=3)
         lines = cv2.HoughLinesP(
@@ -41,21 +43,35 @@ class SpotPerception:
         )
         best_line = None
         best_score = -np.inf
-        h = cv_image.shape[0]
+        h = cv_img.shape[0]
         if lines is not None:
+            max_distance_m = 3.0  # or whatever you want
+            good_lines = []
             for line in lines:
+                x1, y1, x2, y2 = line[0]
+                mid_x = (x1 + x2) // 2
+                mid_y = (y1 + y2) // 2
+                depth, px, py = SpotPerception.get_depth_at_pixel(depth_img, mid_x, mid_y, search_radius=20)
+                if depth is not None and depth < max_distance_m:
+                    # Optionally, you can use (px, py) as your grasp point instead of the exact midpoint
+                    good_lines.append((line, px, py, depth))
+            
+            for line, px, py, depth in good_lines:
                 x1, y1, x2, y2 = line[0]
                 dx = abs(x2 - x1)
                 dy = abs(y2 - y1)
                 length = np.hypot(dx, dy)
                 # Check if vertical enough
-                if dx < dy and length > 30:
+                if dx < 0.5*dy and length > 30:
                     # Score: longer, and closer to bottom of image (foreground)
                     avg_y = (y1 + y2) / 2
                     score = avg_y + 2 * length  # Heavily favor lines lower in image
                     if score > best_score:
                         best_score = score
-                        best_line = (x1, y1, x2, y2)
+                        best_line = (x1, y1, x2, y2, px, py)
+
+        if not best_line:
+            print("best_line is empty")
         return best_line
 
     @staticmethod
@@ -71,21 +87,21 @@ class SpotPerception:
             grasp_point (tuple): (x, y) pixel coordinates for grasp.
         """
         # Find the strongest vertical line
-        line = SpotPerception.find_strongest_vertical_edge(visual_img)
+        line = SpotPerception.find_strongest_vertical_edge(visual_img, depth_img)
         if not line:
             print("No strong vertical line found.")
             return None
-        x1, y1, x2, y2 = line
+        x1, y1, x2, y2, px, py = line
         
         # Calculate line midpoint
-        mid_x = (x1 + x2) // 2
-        mid_y = (y1 + y2) // 2
+        # mid_x = (x1 + x2) // 2
+        # mid_y = (y1 + y2) // 2
         
         # 3. Look up valid depth at or near (cx, cy)
         # depth, px, py = SpotPerception.get_depth_at_pixel(depth_img, mid_x, mid_y, search_radius=5)
         
         if save_img:
-            SpotPerception.save_markup_img(visual_img, line)
+            SpotPerception.save_markup_img(visual_img, line, id)
         
         # # 5. Retrieve camera model from Spot's API
         # image_client = self._spot.ensure_client(ImageClient.default_service_name)
@@ -107,12 +123,12 @@ class SpotPerception:
         #     return grasp_point
         # else:
         #     print("No valid depth at or near edge midpoint. Returning pixel coordinates and None for depth.")
-        return (mid_x, mid_y, None)
+        return px, py
         
     @staticmethod
-    def save_markup_img(img, line, id="spot", depth=None):
+    def save_markup_img(img, line, id, depth=None):
         img_mark = img.copy()
-        x1, y1, x2, y2 = line
+        x1, y1, x2, y2, px, py = line
         # Calculate line midpoint
         mid_x = (x1 + x2) // 2
         mid_y = (y1 + y2) // 2
@@ -122,7 +138,7 @@ class SpotPerception:
         # if depth is not None:
         #     cv2.circle(img_mark, (px, py), 6, (0, 0, 255), -1)
         # else:
-        cv2.circle(img_mark, (mid_x, mid_y), 6, (0, 0, 255), -1)
+        cv2.circle(img_mark, (px, py), 6, (0, 0, 255), -1)
         
         path = f"images/{id}_edge_and_depth_pixel.png"
         cv2.imwrite(path, img_mark)
@@ -246,19 +262,43 @@ class SpotPerception:
         z = depth
         return (x, y, z)
 
-    def get_target_from_user(self):
+    def get_target_from_user(img):
         """
         Displays an image from the robot's camera and waits for user to
         click on a target.
         """
-        cv_image = self.take_picture()
-        # Create a dictionary to hold state for the callback, avoiding globals.
-        callback_data = {'clicked_point': None, 'display_image': cv_image}
-
-        # Show image and wait for click
-        print(f'Robot {self.spot_id}: Click on an object to walk up to...')
-        image_title = 'Click to walk up to target'
+        # Show the image to the user and wait for them to click on a pixel
+        image_title = 'Click to grasp'
         cv2.namedWindow(image_title)
-        cv2.setMouseCallback(
-            image_title, self._get_target_point, param=(self.spot_id, img_data)
-        )
+        cv2.setMouseCallback(image_title, SpotPerception.cv_mouse_callback)
+
+        global g_image_click, g_image_display
+        g_image_click = None
+        g_image_display = img
+        cv2.imshow(image_title, g_image_display)
+        while g_image_click is None:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q') or key == ord('Q'):
+                # Quit
+                print('"q" pressed, exiting.')
+                exit(0)
+
+        print(f"g_image_click {g_image_click}")
+        return g_image_click
+
+    def cv_mouse_callback(event, x, y, flags, param):
+        global g_image_click, g_image_display
+        clone = g_image_display.copy()
+        if event == cv2.EVENT_LBUTTONUP:
+            g_image_click = (x, y)
+        else:
+            # Draw some lines on the image.
+            # print('mouse', x, y)
+            color = (30, 30, 30)
+            thickness = 2
+            image_title = 'Click to grasp'
+            height = clone.shape[0]
+            width = clone.shape[1]
+            cv2.line(clone, (0, y), (width, y), color, thickness)
+            cv2.line(clone, (x, 0), (x, height), color, thickness)
+            cv2.imshow(image_title, clone)

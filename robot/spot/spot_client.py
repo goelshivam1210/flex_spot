@@ -67,6 +67,7 @@ class SpotClient:
         self._command_client = self._spot.ensure_client(RobotCommandClient.default_service_name)
         self._image_client = self._spot.ensure_client(ImageClient.default_service_name)
         self._lease_client = self._spot.ensure_client(LeaseClient.default_service_name)
+        self._lease_client.take('body')
         self._manip_client = self._spot.ensure_client(ManipulationApiClient.default_service_name)
         self._state_client = self._spot.ensure_client(RobotStateClient.default_service_name)
         print(f"{self.id}: Set up clients")

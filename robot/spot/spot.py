@@ -8,6 +8,7 @@ Date: June 2025
 """
 
 import time
+import math
 import numpy as np
 import cv2
 
@@ -24,12 +25,14 @@ from bosdyn.client.lease import LeaseKeepAlive
 from bosdyn.client.math_helpers import SE3Pose, Quat
 from bosdyn.client.robot_command import (
   RobotCommandBuilder,
-  RobotCommandClient,
   blocking_stand,
   block_until_arm_arrives
 )
-from bosdyn.client.robot_state import RobotStateClient
-from google.protobuf import wrappers_pb2
+from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
+from bosdyn.api.geometry_pb2 import SE2VelocityLimit, SE2Velocity, Vec2
+from bosdyn.client.math_helpers import SE2Pose, SE3Pose
+from bosdyn.client.frame_helpers import get_se2_a_tform_b
+from bosdyn.client.robot_command import RobotCommandBuilder
 
 from spot_client import SpotClient
 from spot_camera import SpotCamera
@@ -38,7 +41,7 @@ from spot_perception import SpotPerception
 class Spot:
     """Manages connection, state, and actions for a single robot."""
 
-    def __init__(self, id, hostname, config):
+    def __init__(self, id, hostname, config=None):  #TODO Delete config
         self.id = id
         self.config = config
 
@@ -78,7 +81,19 @@ class Spot:
         cmd_id = self._client._command_client.robot_command(gripper_cmd)
         
         # Wait until the gripper command completes
-        block_until_arm_arrives(self._command_client, cmd_id, timeout_sec=timeout_sec)
+        block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec=timeout_sec)
+        print(f"{self.id}: Gripper open complete.")
+
+    def close_gripper(self, timeout_sec: float = 5.0):
+        """
+        Close Spot's gripper using a claw command.
+        """
+        # Build and send gripper open command
+        gripper_cmd = RobotCommandBuilder.claw_gripper_close_command()
+        cmd_id = self._client._command_client.robot_command(gripper_cmd)
+        
+        # Wait until the gripper command completes
+        block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec=timeout_sec)
         print(f"{self.id}: Gripper open complete.")
 
     def align_to_box_with_pointcloud(self, region=None, angle_threshold_deg=5):
@@ -131,47 +146,17 @@ class Spot:
         print("Failed to align after several attempts.")
         return False
        
-    def grasp_edge(self):
+    def grasp_edge(self, grasp_pt, img_src="hand_color_image"):
         """
         Uses the Spot Manipulation API to grasp at the vertical edge detected in the color image.
         """
-        img_result = self.take_picture()
-        if img_result is None or not isinstance(img_result, tuple):
-            print("Failed to capture color and depth images.")
-            return False
-        color_img, depth_img = img_result
+        cx, cy = grasp_pt  # decompose to x and y
 
-        # Get grasp point
-        result = self.get_vertical_edge_grasp_point()
-        if result is None:
-            print("No grasp point detected.")
-            return False
+        # Get fresh image
+        img_client = self._client._image_client
+        image_response = img_client.get_image_from_sources([img_src])[0]
 
-        # Parse result
-        if result[2] is None:
-            # Only (cx, cy) available (no depth)
-            cx, cy = int(result[0]), int(result[1])
-            depth = None
-        else:
-            # (x, y, z) in camera frame; get pixel for grasp
-            cx, cy = None, None
-            # To improve: keep track of which pixel we used in get_vertical_edge_grasp_point and return it too!
-            # For now, just detect again for demonstration.
-            line = self.find_strongest_vertical_edge(color_img)
-            if not line:
-                print("No strong vertical edge found.")
-                return False
-            x1, y1, x2, y2 = line
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-
-        # Get latest image response from the robot, for the Manipulation API
-        image_client = self._spot.ensure_client(ImageClient.default_service_name)
-        image_source = self.config.image_source
-        image_response = image_client.get_image_from_sources([image_source])[0]
-
-        # Prepare Manipulation API request
-        self.setup_clients()
-        # WalkToObjectInImage not needed, just grasp
+        # Make and send grasp command
         grasp_vec = geometry_pb2.Vec2(x=cx, y=cy)
         pick = manipulation_api_pb2.PickObjectInImage(
             pixel_xy=grasp_vec,
@@ -184,31 +169,30 @@ class Spot:
         )
 
         print(f"Requesting grasp at pixel ({cx}, {cy})")
-        response = self._manip_client.manipulation_api_command(request)
+        response = self._client._manip_client.manipulation_api_command(request)
         cmd_id = response.manipulation_cmd_id
 
-        # Monitor for completion
-        # Monitor for completion with a timeout and more state checks
-        max_wait = 30  # seconds
+        # Monitor for completion with a timeout
+        max_wait = 15  # seconds
         poll_interval = 0.25
         start_time = time.time()
         while True:
             time.sleep(poll_interval)
             fb_req = manipulation_api_pb2.ManipulationApiFeedbackRequest(
                 manipulation_cmd_id=cmd_id)
-            fb_resp = self._manip_client.manipulation_api_feedback_command(
+            fb_resp = self._client._manip_client.manipulation_api_feedback_command(
                 manipulation_api_feedback_request=fb_req)
             state = fb_resp.current_state
             print(f"Manipulation feedback: {state} ({manipulation_api_pb2.ManipulationFeedbackState.Name(state)})")
             if state == manipulation_api_pb2.MANIP_STATE_DONE or \
             state == manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED:
-                print(f"Robot {self.spot_id}: Grasp complete.")
+                print(f"Robot {self.id}: Grasp complete.")
                 break
             elif state == manipulation_api_pb2.MANIP_STATE_GRASP_FAILED:
-                print(f"Robot {self.spot_id}: Grasp failed.")
+                print(f"Robot {self.id}: Grasp failed.")
                 break
             elif time.time() - start_time > max_wait:
-                print(f"Robot {self.spot_id}: Grasp feedback timed out after {max_wait} seconds.")
+                print(f"Robot {self.id}: Grasp feedback timed out after {max_wait} seconds.")
                 break
         return True
 
@@ -224,7 +208,7 @@ class Spot:
         wr1_T_tool = SE3Pose(0, 0, 0, Quat())
 
         # 2. Hold the current hand pose in body frame
-        robot_state_client = self._spot.ensure_client(RobotStateClient.default_service_name)
+        robot_state_client = self._client._state_client
         robot_state = robot_state_client.get_robot_state()
         snapshot = robot_state.kinematic_state.transforms_snapshot
         hand_in_body_proto = snapshot.child_to_parent_edge_map['hand'].parent_tform_child
@@ -239,8 +223,19 @@ class Spot:
         # arm_cmd = arm_command_pb2.ArmCommand()
         # arm_cmd.arm_impedance_command.CopyFrom(impedance_cmd)
 
-        dt = 2 
-        command_client = self._spot.ensure_client(RobotCommandClient.default_service_name)
+        obstacles = spot_command_pb2.ObstacleParams(disable_vision_body_obstacle_avoidance=True,
+                                                    disable_vision_foot_obstacle_avoidance=True,
+                                                    disable_vision_foot_constraint_avoidance=True,
+                                                    obstacle_avoidance_padding=.001)
+
+        speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
+                linear=Vec2(x=0.5, y=0.5), angular=1))        
+        mobility_params = spot_command_pb2.MobilityParams(
+                    obstacle_params=obstacles, vel_limit=speed_limit,
+                    locomotion_hint=spot_command_pb2.HINT_AUTO)
+
+        dt = 10
+        command_client = self._client._command_client
 
         command_arm = RobotCommandBuilder.arm_joint_freeze_command()
         robot_state = robot_state_client.get_robot_state()
@@ -250,7 +245,7 @@ class Spot:
                     dy,
                     0,
                     transforms,
-                    # params = mobility_params,
+                    params = mobility_params,
                     build_on_command=command_arm
         )
         end_t = time.time() + dt
@@ -289,6 +284,102 @@ class Spot:
         #         print("Push command timed out.")
         #         break
         #     time.sleep(0.25)
+
+    def save_initial_yaw(self) -> float:
+        """
+        Gets the robot's current pose and returns only its yaw angle.
+
+        Args:
+            robot_state_client: The robot's state client.
+
+        Returns:
+            A float representing the robot's current yaw angle in radians.
+        """
+        state = self._client._state_client.get_robot_state()
+        # This gets the transform from vision frame to body frame (SE2: x, y, angle)
+        vision_tform_body = get_se2_a_tform_b(
+            state.kinematic_state.transforms_snapshot, "vision", "body"
+        )
+        yaw = vision_tform_body.angle
+        print(f"{self.id}: Yaw saved: {yaw:.2f} radians")
+        return yaw
+    
+    # def return_to_saved_yaw(
+    #     self,
+    #     saved_yaw: float,
+    # ):
+    #     """Rotate Spot in place to the saved yaw (in the vision frame)."""
+    #     print(f"{self.id}: Returning to saved yaw: {saved_yaw:.2f} radians...")
+    #     state = self._client._state_client.get_robot_state()
+    #     vision_tform_body = get_se2_a_tform_b(
+    #         state.kinematic_state.transforms_snapshot, "vision", "body"
+    #     )
+    #     current_x = vision_tform_body.x
+    #     current_y = vision_tform_body.y
+
+    #     # target_pose = SE2Pose(x=current_x, y=current_y, angle=saved_yaw)
+    #     cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
+    #         goal_x=current_x,
+    #         goal_y=current_y,
+    #         goal_heading=saved_yaw,
+    #         frame_name="vision"
+    #     )
+    #     self._client._command_client.robot_command(cmd)
+    #     print(f"{self.id}: Command sent to rotate. Waiting...")
+    #     import time
+    #     time.sleep(3)
+
+    def get_current_pose(self):
+        state = self._client._state_client.get_robot_state()
+        snapshot = state.kinematic_state.transforms_snapshot
+        vision_tform_body = get_se2_a_tform_b(snapshot, "vision", "body")
+        x, y, yaw = vision_tform_body.x, vision_tform_body.y, vision_tform_body.angle
+        print(f"Current pose: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f} rad")
+        return x, y, yaw
+
+    def return_to_saved_yaw(self, saved_yaw: float, tolerance=0.02, max_time=10):
+        """Rotate Spot in place to the saved yaw (in the vision frame)."""
+        def wrap_to_pi(angle):
+            """Wrap an angle in radians to [-pi, pi]."""
+            return (angle + math.pi) % (2 * math.pi) - math.pi
+        
+        print(f"{self.id}: Returning to saved yaw: {saved_yaw:.2f} radians...")
+
+        current_x, current_y, current_yaw = self.get_current_pose()
+        print(f"{self.id}: Yaw diff: {diff:.2f} radians")
+
+        # Send one-shot trajectory command to saved yaw
+        end_time = time.time() + max_time
+        cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
+            goal_x=current_x,
+            goal_y=current_y,
+            goal_heading=saved_yaw,
+            frame_name='vision'
+        )
+        self._client._command_client.robot_command(cmd, end_time_secs=end_time)
+        print(f"{self.id}: Positional rotation command sent.")
+
+        # start_time = time.time()
+        # while abs(diff) > tolerance and (time.time() - start_time) < max_time:
+        #     # Use a small angular velocity in the right direction
+        #     v_rot = 0.3 * direction
+        #     cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0, v_y=0, v_rot=v_rot)
+        #     self._client._command_client.robot_command(cmd)
+        #     time.sleep(0.3)
+        #     # Recalculate
+        #     state = self._client._state_client.get_robot_state()
+        #     vision_tform_body = get_se2_a_tform_b(
+        #         state.kinematic_state.transforms_snapshot, "vision", "body"
+        #     )
+        #     current_yaw = vision_tform_body.angle
+        #     diff = wrap_to_pi(saved_yaw - current_yaw)
+        #     direction = 1 if diff > 0 else -1
+        #     print(f"{self.id}: Yaw error: {diff:.2f} radians")
+        # # Stop movement
+        # self._client._command_client.robot_command(
+        #     RobotCommandBuilder.synchro_velocity_command(v_x=0, v_y=0, v_rot=0)
+        # )
+        print(f"{self.id}: Done rotating.")
 
 
 if __name__ == "__main__":
@@ -333,23 +424,57 @@ if __name__ == "__main__":
         spot.power_on()
         spot.stand_up()
 
+        # 1. Save initial yaw
+        saved_yaw = spot.save_initial_yaw()
+
+        # 2. Walk forward by 1 meter (no rotation)
+        walk_distance = 1.0  # meters
+        command_client = spot._client._command_client
+        state_client = spot._client._state_client
+        robot_state = state_client.get_robot_state()
+        transforms = robot_state.kinematic_state.transforms_snapshot
+
+        duration = 3.0
+        end_time = time.time() + duration
+
+        # Walk forward
+        traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+            walk_distance, 0.0, 0.0, transforms
+        )
+        cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_time)
+        time.sleep(3)
+
+        rot90_rad = -math.pi / 2  # -90 degrees
+
+        # Rotate 90° CW
+        traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+            0.0, 0.0, rot90_rad, transforms
+        )
+        cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_time)
+        time.sleep(3)
+
+        # 4. Rotate back to original heading using your return_to_saved_yaw function
+        spot.return_to_saved_yaw(saved_yaw)
+
         # 1. Take picture of box and get grasp point
-        spot.open_gripper()
-        color_img, depth_img = spot.take_picture(
-            color_src=hand_img_src,
-            depth_src=hand_depth_src,
-            save_images=True
-        )
-        grasp_pt = SpotPerception.get_vertical_edge_grasp_point(
-            color_img, depth_img, spot.id
-        )
+        # spot.open_gripper()
+        # spot.close_gripper()
 
-        # 2. Grasp edge
-        spot.grasp_edge()
-        spot.open_gripper()  # Keep gripper open to prevent losing grip
+        # color_img, depth_img = spot.take_picture(
+        #     color_src=hand_img_src,
+        #     depth_src=hand_depth_src,
+        #     save_images=True
+        # )
+        # grasp_pt = SpotPerception.get_vertical_edge_grasp_point(
+        #     color_img, depth_img, spot.id, save_img=True
+        # )
 
-        # 3. Push box
-        spot.push_object()
+        # # 2. Grasp edge
+        # spot.grasp_edge(grasp_pt)
+        # spot.open_gripper()  # Keep gripper open to prevent losing grip
+
+        # # 3. Push box
+        # spot.push_object()
 
 ##############
 # Old Code
