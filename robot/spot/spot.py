@@ -346,6 +346,7 @@ class Spot:
         print(f"{self.id}: Returning to saved yaw: {saved_yaw:.2f} radians...")
 
         current_x, current_y, current_yaw = self.get_current_pose()
+        diff = current_yaw - saved_yaw
         print(f"{self.id}: Yaw diff: {diff:.2f} radians")
 
         # Send one-shot trajectory command to saved yaw
