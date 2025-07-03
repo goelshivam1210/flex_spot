@@ -5,6 +5,7 @@ Author: Tim
 Date: July 1, 2025
 """
 import threading
+import numpy as np
 
 from bosdyn.client.lease import LeaseKeepAlive
 
@@ -60,13 +61,13 @@ def push_thread(spot, grasp_pt, stop_event, sync_barrier, grasp_event, push_even
             if stop_event.is_set():
                 return
             
-            dx = 1
-            dy = 0 #-0.25
+            if spot.id == "Phi":
+                dx, dy, d_yaw = 0.7, 0.7, np.pi/2
             if spot.id == "Psi":
-                dy = -dy
+                dx, dy, d_yaw = 2.55, 2.55, np.pi/2
 
             # # 3. Push box
-            spot.push_object(dx=dx, dy=dy)
+            spot.push_object(dx=dx, dy=dy, d_yaw=d_yaw, dt=30)
 
 if __name__ == "__main__":
     phi = Spot(id="Phi", hostname="192.168.1.100")

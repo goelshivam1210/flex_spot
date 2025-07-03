@@ -30,13 +30,14 @@ from bosdyn.client.robot_command import (
 )
 from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
 from bosdyn.api.geometry_pb2 import SE2VelocityLimit, SE2Velocity, Vec2
+from bosdyn.client import math_helpers
 from bosdyn.client.math_helpers import SE2Pose, SE3Pose
-from bosdyn.client.frame_helpers import get_se2_a_tform_b
+from bosdyn.client.frame_helpers import get_se2_a_tform_b, get_a_tform_b, ODOM_FRAME_NAME, BODY_FRAME_NAME, VISION_FRAME_NAME
 from bosdyn.client.robot_command import RobotCommandBuilder
 
-from spot_client import SpotClient
-from spot_camera import SpotCamera
-from spot_perception import SpotPerception
+from .spot_client import SpotClient
+from .spot_camera import SpotCamera
+from .spot_perception import SpotPerception
 
 class Spot:
     """Manages connection, state, and actions for a single robot."""
@@ -196,7 +197,7 @@ class Spot:
                 break
         return True
 
-    def push_object(self, dx=1, dy=0.5, distance=0.3, speed=0.2):
+    def push_object(self, dx=0, dy=0, d_yaw=0, dt=10):
         """
         Push the grasped object by walking Spot's base in a given direction.
         Args:
@@ -228,13 +229,16 @@ class Spot:
                                                     disable_vision_foot_constraint_avoidance=True,
                                                     obstacle_avoidance_padding=.001)
 
+        vx = dx/dt
+        vy = dy/dt
+        v_yaw = d_yaw/dt
+
         speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
-                linear=Vec2(x=0.5, y=0.5), angular=1))        
+                linear=Vec2(x=vx, y=vy), angular=v_yaw))        
         mobility_params = spot_command_pb2.MobilityParams(
                     obstacle_params=obstacles, vel_limit=speed_limit,
                     locomotion_hint=spot_command_pb2.HINT_AUTO)
 
-        dt = 10
         command_client = self._client._command_client
 
         command_arm = RobotCommandBuilder.arm_joint_freeze_command()
@@ -243,7 +247,7 @@ class Spot:
         traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
                     dx,
                     dy,
-                    0,
+                    d_yaw,
                     transforms,
                     params = mobility_params,
                     build_on_command=command_arm
@@ -334,10 +338,10 @@ class Spot:
         snapshot = state.kinematic_state.transforms_snapshot
         vision_tform_body = get_se2_a_tform_b(snapshot, "vision", "body")
         x, y, yaw = vision_tform_body.x, vision_tform_body.y, vision_tform_body.angle
-        print(f"Current pose: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f} rad")
+        print(f"{self.id}: Current pose: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f} rad")
         return x, y, yaw
 
-    def return_to_saved_yaw(self, saved_yaw: float, tolerance=0.02, max_time=10):
+    def return_to_saved_yaw(self, saved_yaw: float, tolerance=0.02, max_time=5):
         """Rotate Spot in place to the saved yaw (in the vision frame)."""
         def wrap_to_pi(angle):
             """Wrap an angle in radians to [-pi, pi]."""
@@ -349,37 +353,47 @@ class Spot:
         diff = current_yaw - saved_yaw
         print(f"{self.id}: Yaw diff: {diff:.2f} radians")
 
+        # 1. Take fresh snapshot
+        snapshot = self._client._state_client.get_robot_state().kinematic_state.transforms_snapshot
+
+        # 2. Get current hand pose in vision (world) frame
+        vision_T_hand = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
+        if vision_T_hand is None:
+            raise RuntimeError("Hand transform not found")
+
+        # 3. Build and send freeze command using that pose
+        hand_pose_proto = vision_T_hand.to_proto()
+        arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
+            hand_pose_proto, VISION_FRAME_NAME, seconds=2.0)
+
+        sync_cmd = RobotCommandBuilder.build_synchro_command(arm_cmd)
+        cmd_id = self._client._command_client.robot_command(sync_cmd)
+        block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec=3.0)
+        print("Hand now frozen in world (vision) frame.")
+        
+        obstacles = spot_command_pb2.ObstacleParams(disable_vision_body_obstacle_avoidance=True,
+                                            disable_vision_foot_obstacle_avoidance=True,
+                                            disable_vision_foot_constraint_avoidance=True,
+                                            obstacle_avoidance_padding=.001)
+
+        speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
+                linear=Vec2(x=0.5, y=0.5), angular=1))        
+        mobility_params = spot_command_pb2.MobilityParams(
+                    obstacle_params=obstacles, vel_limit=speed_limit,
+                    locomotion_hint=spot_command_pb2.HINT_AUTO)
+
         # Send one-shot trajectory command to saved yaw
         end_time = time.time() + max_time
         cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
             goal_x=current_x,
             goal_y=current_y,
             goal_heading=saved_yaw,
+            params = mobility_params,
             frame_name='vision'
         )
         self._client._command_client.robot_command(cmd, end_time_secs=end_time)
         print(f"{self.id}: Positional rotation command sent.")
-
-        # start_time = time.time()
-        # while abs(diff) > tolerance and (time.time() - start_time) < max_time:
-        #     # Use a small angular velocity in the right direction
-        #     v_rot = 0.3 * direction
-        #     cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0, v_y=0, v_rot=v_rot)
-        #     self._client._command_client.robot_command(cmd)
-        #     time.sleep(0.3)
-        #     # Recalculate
-        #     state = self._client._state_client.get_robot_state()
-        #     vision_tform_body = get_se2_a_tform_b(
-        #         state.kinematic_state.transforms_snapshot, "vision", "body"
-        #     )
-        #     current_yaw = vision_tform_body.angle
-        #     diff = wrap_to_pi(saved_yaw - current_yaw)
-        #     direction = 1 if diff > 0 else -1
-        #     print(f"{self.id}: Yaw error: {diff:.2f} radians")
-        # # Stop movement
-        # self._client._command_client.robot_command(
-        #     RobotCommandBuilder.synchro_velocity_command(v_x=0, v_y=0, v_rot=0)
-        # )
+        time.sleep(max_time)
         print(f"{self.id}: Done rotating.")
 
 
@@ -429,33 +443,41 @@ if __name__ == "__main__":
         saved_yaw = spot.save_initial_yaw()
 
         # 2. Walk forward by 1 meter (no rotation)
-        walk_distance = 1.0  # meters
-        command_client = spot._client._command_client
-        state_client = spot._client._state_client
-        robot_state = state_client.get_robot_state()
-        transforms = robot_state.kinematic_state.transforms_snapshot
+        # walk_distance = 1.5  # meters
+        # command_client = spot._client._command_client
+        # state_client = spot._client._state_client
+        # robot_state = state_client.get_robot_state()
+        # transforms = robot_state.kinematic_state.transforms_snapshot
 
-        duration = 3.0
-        end_time = time.time() + duration
+        # duration = 4.0
+        # end_time = time.time() + duration
 
-        # Walk forward
-        traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
-            walk_distance, 0.0, 0.0, transforms
-        )
-        cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_time)
-        time.sleep(3)
+        # # Walk forward
+        # traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+        #     walk_distance, 0.0, 0.0, transforms
+        # )
+        # cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_time)
+        # time.sleep(duration)
 
-        rot90_rad = -math.pi / 2  # -90 degrees
+        # print("finished walking forwards")
 
-        # Rotate 90° CW
-        traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
-            0.0, 0.0, rot90_rad, transforms
-        )
-        cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_time)
-        time.sleep(3)
+        # radians = -math.pi / 2  # -90 degrees
 
-        # 4. Rotate back to original heading using your return_to_saved_yaw function
-        spot.return_to_saved_yaw(saved_yaw)
+        # end_time = time.time() + duration
+        # x, y, _ = spot.get_current_pose()
+        # # Rotate 90° CW
+        # traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+        #     x, y, radians, transforms
+        # )
+        # cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_time)
+        
+        # print(f"rotating {radians} radians.")
+        # time.sleep(duration)
+        # print("finished rotating in place")
+
+
+        # # 4. Rotate back to original heading using your return_to_saved_yaw function
+        # spot.return_to_saved_yaw(saved_yaw)
 
         # 1. Take picture of box and get grasp point
         # spot.open_gripper()
