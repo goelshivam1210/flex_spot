@@ -50,7 +50,7 @@ def push_thread(spot, grasp_pt, stop_event, sync_barrier, grasp_event, push_even
 
             # 2. Grasp edge
             spot.grasp_edge(grasp_pt)
-            spot.open_gripper()  # Keep gripper open to prevent losing grip
+            # spot.open_gripper()  # Keep gripper open to prevent losing grip
 
             # Return to original orientation (hopefully)
             spot.return_to_saved_yaw(saved_yaw)
@@ -62,12 +62,12 @@ def push_thread(spot, grasp_pt, stop_event, sync_barrier, grasp_event, push_even
                 return
             
             if spot.id == "Phi":
-                dx, dy, d_yaw = 0.7, 0.7, np.pi/2
+                dx, dy, d_yaw = 1.1, 0.7, np.pi/2
             if spot.id == "Psi":
-                dx, dy, d_yaw = 2.55, 2.55, np.pi/2
+                dx, dy, d_yaw = 2.95, 2.55, np.pi/2
 
             # # 3. Push box
-            spot.push_object(dx=dx, dy=dy, d_yaw=d_yaw, dt=30)
+            spot.push_object(dx=dx, dy=dy, d_yaw=d_yaw, dt=20)
 
 if __name__ == "__main__":
     phi = Spot(id="Phi", hostname="192.168.1.100")
