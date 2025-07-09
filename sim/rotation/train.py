@@ -182,7 +182,7 @@ def main():
             total_steps += 1
             ep_steps += 1
 
-            # Action selection: random until warm‐up, then policy + noise
+            # Action selection: random until warm-up, then policy + noise
             if total_steps < start_timesteps:
                 action = env.action_space.sample()
             else:
@@ -228,18 +228,18 @@ def main():
                                     num_episodes=args.test_episodes,
                                     render=args.render_test)
 
-            print(f"  >> Short‐seg Success: {short_stats['success_rate']:.2f}, "
-                f"Full‐arc Success: {full_stats['success_rate']:.2f}")
+            print(f"  >> Short-seg Success: {short_stats['success_rate']:.2f}, "
+                f"Full-arc Success: {full_stats['success_rate']:.2f}")
             writer.add_scalar("Eval/ShortSuccess", short_stats["success_rate"], total_steps)
             writer.add_scalar("Eval/FullSuccess",  full_stats["success_rate"],  total_steps)
             writer.add_scalar("Eval/ShortReward",  short_stats["avg_reward"],   total_steps)
             writer.add_scalar("Eval/FullReward",   full_stats["avg_reward"],    total_steps)
 
-            # Save best model on full‐arc success
+            # Save best model on full-arc success
             if full_stats["success_rate"] > best_full_success:
                 best_full_success = full_stats["success_rate"]
                 agent.save(models_dir, "best_model")
-                print(f" New best full‐arc success: {best_full_success:.2f} — model saved")
+                print(f" New best full-arc success: {best_full_success:.2f} — model saved")
 
         # Periodic checkpointing
         if ep % training_cfg.get("save_freq", 2000) == 0:
@@ -252,15 +252,15 @@ def main():
     final_full  = test_policy(test_env_full,  agent,
                             num_episodes=args.test_episodes * 2,
                             render=args.render_test)
-    print(f"\nFINAL SHORT‐SEG: Reward={final_short['avg_reward']:.2f}, Success={final_short['success_rate']:.2f}")
-    print(f"FINAL FULL‐ARC:  Reward={final_full['avg_reward']:.2f}, Success={final_full['success_rate']:.2f}")
+    print(f"\nFINAL SHORT-SEG: Reward={final_short['avg_reward']:.2f}, Success={final_short['success_rate']:.2f}")
+    print(f"FINAL FULL-ARC:  Reward={final_full['avg_reward']:.2f}, Success={final_full['success_rate']:.2f}")
 
     # Save final model
     agent.save(models_dir, "final_model")
 
-    # Large‐scale generalization test
+    # Large-scale generalization test
     gen_rate = random_arc_generalization_test(test_env_full, agent, episodes=100)
-    print(f"Random‐Arc Generalization (100 trials): Success Rate={gen_rate:.2f}")
+    print(f"Random-Arc Generalization (100 trials): Success Rate={gen_rate:.2f}")
 
     # Clean up
     env.close()

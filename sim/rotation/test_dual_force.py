@@ -20,6 +20,8 @@ works correctly both for individual micro-policies and when stitching them toget
 
 import os
 import numpy as np
+import pandas as pd
+import imageio
 import mujoco
 import mujoco.viewer
 import time
@@ -30,6 +32,48 @@ from scipy.spatial.transform import Rotation
 
 from env_mujoco import SimplePathFollowingEnv
 from td3 import TD3
+
+
+import imageio
+import mujoco
+
+
+class VideoRecorder:
+    """
+    A class for offscreen video recording of a MuJoCo simulation.
+    """
+    def __init__(self, model, data, output_path, width=800, height=600, fps=30):
+        self.model = model
+        self.data = data
+        self.writer = imageio.get_writer(output_path, fps=fps)
+        self.renderer = mujoco.Renderer(model, height, width)
+
+        # Create a dedicated MjvCamera instance for recording
+        self.cam = mujoco.MjvCamera()
+        
+        # Set camera properties for a zoomed-out, angled view
+        self.cam.distance = 7.5
+        self.cam.azimuth = 90.0
+        self.cam.elevation = -30.0
+        
+        # Set the camera to look at a point in the center of the scene
+        self.cam.lookat = np.array([0.0, 0.0, 0.5])
+
+    def capture(self):
+        """
+        Captures a single frame from the simulation using the custom camera.
+        """
+        # Tell the renderer to use our specific camera when updating the scene
+        self.renderer.update_scene(self.data, camera=self.cam)
+        pixels = self.renderer.render()
+        self.writer.append_data(pixels)
+
+    def close(self):
+        """
+        Closes the video writer and cleans up the renderer.
+        """
+        self.writer.close()
+        self.renderer.close()
 
 class DualForceTestEnv(SimplePathFollowingEnv):
     """Extended environment that can apply forces in two different ways"""
@@ -390,22 +434,31 @@ def load_trained_model(model_path, env):
     return agent
 
 
-def test_episode(env, agent, mode, max_steps=500, render=False):
+def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
     """Run a single test episode"""
     env.set_force_mode(mode)
     state, _ = env.reset()
+
+    # --- Data Logging Setup ---
+    pd.set_option('display.max_rows', None)
+    pd.set_option('display.width', 1000)
+    debug_data = []
+    # --------------------------
     
     total_reward = 0
     step_count = 0
     segment_rewards = []  # Track rewards per segment
     current_segment = 0
 
-    viewer = env.enable_rendering()
-    if viewer is None:
-        print("Failed to create viewer!")
-        return None
-    
     print(f"\n=== Testing in {mode.upper()} mode ===")
+
+    viewer = None
+    if render:
+        viewer = env.enable_rendering()
+        if viewer is None:
+            print("Failed to create viewer!")
+            return None
+        time.sleep(1.0) # Give viewer time to initialize
 
     time.sleep(2.0)
 
@@ -434,15 +487,39 @@ def test_episode(env, agent, mode, max_steps=500, render=False):
         if step_count % 50 == 0:
             print(f"Step {step_count}: Progress={info['progress']:.3f}, "
                 f"Deviation={info['deviation']:.3f}, Reward={reward:.2f}")
+            
+        # --- Log data for this step ---
+        log_entry = {
+            'step': step_count,
+            'progress': info['progress'],
+            'deviation': info['deviation'],
+            'lat_err': info['lateral_error'],
+            'orient_err': info['orientation_error'],
+            'action_fx': action[0],
+            'action_fy': action[1],
+            'action_tz': action[2],
+            'reward': reward
+        }
+        debug_data.append(log_entry)
+        # -----------------------------
         
         if render:
             viewer.sync()
-        
+            time.sleep(0.01)
+
+        if recorder:
+            recorder.capture()
+
         if done or truncated:
             break
     
     # Add final segment reward
     segment_rewards.append(total_reward - sum(segment_rewards))
+
+    print("\n--- Episode Log ---")
+    df = pd.DataFrame(debug_data)
+    print(df.to_string())
+    print("-" * 20)
     
     print(f"Episode finished: Steps={step_count}, Total Reward={total_reward:.2f}")
     print(f"Final Progress: {info['progress']:.3f}, Final Deviation: {info['deviation']:.3f}")
@@ -481,6 +558,9 @@ def main():
                        help="Maximum steps per episode")
     parser.add_argument("--render", action="store_true", 
                         help="Render the episodes in a GUI window.")
+    parser.add_argument("--record", type=str, default=None,
+                help="If set, record offscreen to this mp4 file")
+
     
     args = parser.parse_args()
     
@@ -492,7 +572,7 @@ def main():
     
     # Create test environments for both short segments and full arcs
     env_short = DualForceTestEnv(
-        gui=True,  # Always use GUI for testing
+        gui=args.render,
         max_force=env_cfg.get("max_force", 300.0),
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.4),
@@ -504,7 +584,7 @@ def main():
     )
     
     env_full = DualForceTestEnv(
-        gui=True,  # Always use GUI for testing
+        gui=args.render,
         max_force=env_cfg.get("max_force", 300.0),
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.4),
@@ -519,7 +599,7 @@ def main():
     print(f"Loading model from: {args.model_path}")
     agent = load_trained_model(args.model_path, env_short)
     print("Model loaded successfully!")
-    
+
     # Test both modes on both environments
     modes = ["centroid", "contact"]
     envs = {
@@ -543,12 +623,24 @@ def main():
             
             for episode in range(args.episodes):
                 print(f"\nEpisode {episode + 1}/{args.episodes}")
-                
-                result = test_episode(env, agent, mode, args.max_steps)
+                recorder = None
+                if args.record:
+                    # Create a unique filename for each episode
+                    base_path, ext = os.path.splitext(args.record)
+                    output_path = f"{base_path}_{env_name}_{mode}_ep{episode + 1}{ext}"
+                    print(f"Recording episode to {output_path}...")
+                    recorder = VideoRecorder(
+                        env.model,
+                        env.data,
+                        output_path,
+                        width=800, height=600, fps=40
+                    )
+                result = test_episode(env, agent, mode, args.max_steps, render=args.render, recorder=recorder)
                 mode_results.append(result)
                 
                 # Add sleep for visualization
-                time.sleep(1.0)
+                if args.render:
+                    time.sleep(1.0)
             
             # Calculate statistics
             avg_reward = np.mean([r['total_reward'] for r in mode_results])
@@ -611,7 +703,9 @@ def main():
     
     env_short.close()
     env_full.close()
-
+    if recorder:
+        recorder.close()
+        print(f"✓ Wrote video to {args.record}")
 
 if __name__ == "__main__":
     main()

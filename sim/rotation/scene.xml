@@ -10,6 +10,10 @@
     <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance="0.2"/>
   </asset>
 
+  <visual>
+    <global offwidth="800" offheight="600"/>
+  </visual>
+
   <worldbody>
     <light pos="0 0 3" dir="0 0 -1" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2" directional="true"/>
     <geom name="floor" size="5 5 0.1" type="plane" material="grid"/>

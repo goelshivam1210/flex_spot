@@ -23,8 +23,9 @@ class SimplePathFollowingEnv(gym.Env):
     """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 40}
 
-    def __init__(self, model_path='scene.xml', **kwargs):
+    def __init__(self, model_path='scene.xml', render_mode=None, **kwargs):
         super(SimplePathFollowingEnv, self).__init__()
+        self.render_mode = render_mode
 
         # Load parameters from kwargs, with defaults
         self.gui = kwargs.get('gui', False)
@@ -246,9 +247,24 @@ class SimplePathFollowingEnv(gym.Env):
         return state_after, reward, done, truncated, info
 
     def render(self):
-        if self.viewer and self.viewer.is_running():
-            self.viewer.sync()
+        if self.render_mode == "human":
+            if self.viewer and self.viewer.is_running():
+                self.viewer.sync()
 
+        elif self.render_mode == "rgb_array":
+            # off-screen render
+            # note: mujoco-python has a built-in convenience call:
+            return self.model.render(
+                height=600,
+                width=800,
+                camera_id=0,      # or whichever camera you want
+                segmentation=False,
+                depth=False
+            )
+
+        else:
+            # no-op
+            return None
     def _calculate_reward(self, state_before, state_after):
         progress_before, progress_after = state_before[3], state_after[3]
         deviation, lateral_error, orientation_error = state_after[4], abs(state_after[0]), abs(state_after[2])
