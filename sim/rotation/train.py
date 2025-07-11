@@ -101,6 +101,7 @@ def main():
     env_cfg = config["env"]
     agent_cfg = config["agent"]
     training_cfg = config["training"]
+    curriculum_cfg = training_cfg.get("curriculum", None)
 
     # Set random seeds for reproducibility
     seed = args.seed
@@ -171,6 +172,12 @@ def main():
     best_full_success = 0.0
 
     for ep in range(episodes):
+        if curriculum_cfg is not None:
+            for tier in curriculum_cfg:
+                if ep <= tier["until"]:
+                    env.segment_length = tier["segment"] if tier["segment"] is not None else None
+                    break
+
         # Reset training environment (draws a new short segment automatically)
         state, _ = env.reset()
         ep_reward = 0.0
