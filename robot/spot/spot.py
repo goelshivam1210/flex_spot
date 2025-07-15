@@ -35,6 +35,8 @@ from bosdyn.client.math_helpers import SE2Pose, SE3Pose
 from bosdyn.client.frame_helpers import get_se2_a_tform_b, get_a_tform_b, ODOM_FRAME_NAME, BODY_FRAME_NAME, VISION_FRAME_NAME
 from bosdyn.client.robot_command import RobotCommandBuilder
 
+from google.protobuf import wrappers_pb2
+
 from .spot_client import SpotClient
 from .spot_camera import SpotCamera
 from .spot_perception import SpotPerception
@@ -96,6 +98,60 @@ class Spot:
         # Wait until the gripper command completes
         block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec=timeout_sec)
         print(f"{self.id}: Gripper open complete.")
+
+    def unstow_arm(self, timeout_sec=3.0):
+        """Unstow arm to ready position."""
+        unstow_cmd = RobotCommandBuilder.arm_ready_command()
+        cmd_id = self._client._command_client.robot_command(unstow_cmd)
+        block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec)
+        print(f"{self.id}: Arm unstowed")
+
+    def stow_arm(self, timeout_sec=3.0):
+        """Stow arm back to resting position."""
+        stow_cmd = RobotCommandBuilder.arm_stow_command()
+        cmd_id = self._client._command_client.robot_command(stow_cmd)
+        block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec)
+        print(f"{self.id}: Arm stowed")
+
+    def walk_to_pixel(self, pixel_xy, img_src="hand_color_image", offset_distance=0.2):
+        """Walk to a pixel location without grasping."""
+        cx, cy = pixel_xy
+        img_client = self._client._image_client
+        image_response = img_client.get_image_from_sources([img_src])[0]
+        
+        walk_vec = geometry_pb2.Vec2(x=cx, y=cy)
+        walk_to = manipulation_api_pb2.WalkToObjectInImage(
+            pixel_xy=walk_vec,
+            transforms_snapshot_for_camera=image_response.shot.transforms_snapshot,
+            frame_name_image_sensor=image_response.shot.frame_name_image_sensor,
+            camera_model=image_response.source.pinhole,
+            offset_distance=wrappers_pb2.FloatValue(value=offset_distance)
+        )
+        
+        request = manipulation_api_pb2.ManipulationApiRequest(walk_to_object_in_image=walk_to)
+        response = self._client._manip_client.manipulation_api_command(request)
+        
+        # Wait for completion with timeout
+        print(f"{self.id}: Walking to pixel ({cx}, {cy})...")
+        start_time = time.time()
+        timeout_duration = 15.0
+        
+        while True:
+            time.sleep(0.25)
+            if time.time() - start_time > timeout_duration:
+                print(f"{self.id}: Walk timed out after {timeout_duration}s")
+                break
+                
+            fb_req = manipulation_api_pb2.ManipulationApiFeedbackRequest(
+                manipulation_cmd_id=response.manipulation_cmd_id
+            )
+            fb_resp = self._client._manip_client.manipulation_api_feedback_command(fb_req)
+            
+            if fb_resp.current_state == manipulation_api_pb2.MANIP_STATE_DONE:
+                print(f"{self.id}: Walk completed successfully")
+                break
+        
+        return True
 
     def align_to_box_with_pointcloud(self, region=None, angle_threshold_deg=5):
         """
