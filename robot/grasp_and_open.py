@@ -3,8 +3,14 @@ Executes grasps and executes
 revolute or prismatic joint movements
 based on the particular joint configuraton estimation
 
-Integrates Spot robot control with interactive perception for object manipulation.
-Grasp object based on user selection, print state values, return to rest.
+The code is divided into two phases:
+1. Phase 1: Interactive perception to select grasp target and estimate joint type.
+2. Phase 2: Policy-based manipulation using the estimated joint type.
+As an additional step in phase 2, the robot will return to a clearance yaw pose
+and then finally it will dock itself.
+
+Example usage:
+    python grasp_and_open.py --hostname 192.168.1.100 --max-steps 15 --action-scale 0.05
 
 Author: Shivam Goel
 Date: July 2025
@@ -15,6 +21,7 @@ import time
 import numpy as np
 import cv2
 import json
+import math
 
 # Import Spot SDK modules
 from bosdyn.client.lease import LeaseKeepAlive
@@ -392,7 +399,7 @@ class InteractiveSpotController:
             print(f" Error during Phase 1 execution: {e}")
             return False
         
-    def run_phase2(self, max_steps=50, action_scale=0.02, success_threshold=None):
+    def run_phase2(self, max_steps=50, action_scale=0.02, success_threshold=None, clearance_yaw_offset=45):
         """Execute Phase 2: Policy-based manipulation."""
         print("\n Starting Phase 2: Policy Execution")
         print("=" * 50)
@@ -400,6 +407,7 @@ class InteractiveSpotController:
         # Initialize PolicyManager and load policy
         policy_manager = PolicyManager()
         joint_type = self.interactive_perception.joint_type
+        radius = self.interactive_perception.joint_params['radius']
         
         try:
             policy = policy_manager.load_policy(joint_type)
@@ -412,9 +420,11 @@ class InteractiveSpotController:
         snapshot = robot_state.kinematic_state.transforms_snapshot
         initial_hand_pose = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
         initial_hand_pos = np.array([initial_hand_pose.x, initial_hand_pose.y, initial_hand_pose.z])
-        
+        # get spots current yaw
+        current_yaw = self.spot.get_current_pose()[2]
         # Execution loop with logging
         trajectory_log = []
+        manipulation_success = False
         
         for step in range(max_steps):
             # Get current hand position
@@ -433,7 +443,7 @@ class InteractiveSpotController:
             # Flatten action if it's 2D
             if len(action.shape) > 1:
                 action = action.flatten()
-            action[0] = -action[0]  # Invert action direction for Spot
+            action[0] = -action[0]  # Invert x action direction for Spot
             
             # Convert to target position
             target_position = current_hand_pos + (action * action_scale)
@@ -456,6 +466,7 @@ class InteractiveSpotController:
                 # Check success
                 if self.check_success(initial_hand_pos, current_hand_pos, success_threshold):
                     print(f" Task completed successfully in {step+1} steps!")
+                    manipulation_success = True
                     break
                     
             except Exception as e:
@@ -465,6 +476,22 @@ class InteractiveSpotController:
         # Print trajectory log summary
         print(f"\n Policy execution completed: {len(trajectory_log)} steps")
         print(f" Trajectory log: {trajectory_log}")
+
+        # sleep for a moment to observe the final position
+        print("\n Holding position for 2 seconds...")
+        time.sleep(2)
+        
+        # Simple clearance for revolute joints
+        if joint_type == "revolute":
+            print(f" Revolute joint detected - realigning robot for clearance...")
+            
+            # Calculate clearance yaw (45 degrees offset from current position)
+            clearance_yaw = current_yaw - math.radians(clearance_yaw_offset)
+            self.spot.push_object(dx=2*radius, dy = -radius)
+            
+            # Use existing return_to_saved_yaw method
+            # self.spot.return_to_saved_yaw(clearance_yaw)
+            print(" Robot realigned for door clearance")
         
         return len(trajectory_log) > 0
 
@@ -540,14 +567,18 @@ def main():
                 success_threshold={
                     'distance': args.success_distance,
                     'angle': args.success_angle
-                }
+                },
+                clearance_yaw_offset=45  # Default clearance offset
             )
             
             if phase2_success:
                 print(" Phase 2 completed successfully")
             else:
                 print(" Phase 2 failed")
-                
+
+            # ask user if they want to release and finish
+            input("\n Press Enter to proceed to Phase 3 (Release and Finish)...")
+        
             # Phase 3: Release and finish
             controller.release_and_finish()
         else:
