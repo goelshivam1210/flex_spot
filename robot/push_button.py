@@ -27,12 +27,13 @@ from bosdyn.client.arm_surface_contact import ArmSurfaceContactClient
 from bosdyn.client.frame_helpers import (GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME, 
                                         get_a_tform_b)
 from bosdyn.client.lease import LeaseKeepAlive
-from bosdyn.client.robot_command import RobotCommandBuilder
+from bosdyn.client.robot_command import RobotCommandBuilder, block_until_arm_arrives
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.util import seconds_to_duration
 
-# Import your existing Spot modules
+# Import custom Spot modules
 from spot.spot import Spot, SpotPerception
+from spot.spot_camera import SpotCamera
 
 
 def user_confirm_step(step_description):
@@ -50,9 +51,8 @@ def user_confirm_step(step_description):
     
     return True
 
-
-def cleanup_and_exit(spot):
-    """Safely cleanup and exit the program."""
+def cleanup_and_exit(spot, dock_id=521):
+    """Safely cleanup and exit the program with full shutdown."""
     try:
         print('Performing safe shutdown...')
         
@@ -64,7 +64,15 @@ def cleanup_and_exit(spot):
         except Exception as e:
             print(f'Could not stow arm: {e}')
         
-        print('Robot safely handled.')
+        # Try to dock the robot
+        try:
+            print('Attempting to dock robot...')
+            spot.dock(dock_id=dock_id)
+            print('Robot docked successfully')
+        except Exception as e:
+            print(f'Could not dock robot: {e}')
+        
+        print('Robot safely shut down.')
         
     except Exception as e:
         print(f'Error during cleanup: {e}')
@@ -98,7 +106,7 @@ def walk_to_button_location(spot, config):
     # Walk to button location using the new method
     spot.walk_to_pixel(target_pixel, 
                       img_src=config.image_source, 
-                      offset_distance=config.approach_distance)
+                      offset_distance=config.approach_distance, timeout=config.walk_timeout)
     
     print('Walk to button location completed')
 
@@ -115,7 +123,7 @@ def execute_surface_contact_push(spot, config):
     robot_state = robot_state_client.get_robot_state()
     snapshot = robot_state.kinematic_state.transforms_snapshot
     
-    # Get current hand pose (where arm is after unstowing)
+    # Get current hand pose (where arm is after gazing)
     current_hand_pose = get_a_tform_b(snapshot, 'body', 'hand')
     if current_hand_pose is None:
         print('Could not get current hand pose')
@@ -123,12 +131,10 @@ def execute_surface_contact_push(spot, config):
     
     print(f'Current hand position: x={current_hand_pose.x:.3f}, y={current_hand_pose.y:.3f}, z={current_hand_pose.z:.3f}')
     
-    # Keep the same X,Y position, just go straight down in Z
+    # Keep the same X,Y position
     hand_x = current_hand_pose.x  # Keep current X position
     hand_y = current_hand_pose.y  # Keep current Y position  
     hand_z = current_hand_pose.z  # Start from current Z position
-    
-    print(f'Will press button straight down from current position')
     
     # Create downward-facing orientation (pointing straight down)
     qw = 0.707  # cos(45°) 
@@ -137,17 +143,46 @@ def execute_surface_contact_push(spot, config):
     qz = 0      # No rotation around Z
     body_Q_hand = geometry_pb2.Quaternion(w=qw, x=qx, y=qy, z=qz)
     
-    # Define start and end positions (same X,Y, maintain current Z)
+    # Get transform to odom frame
+    odom_T_flat_body = get_a_tform_b(robot_state.kinematic_state.transforms_snapshot,
+                                     ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+    
+    # STEP 1: Orient gripper downward at current position
+    print('Orienting gripper downward at current position...')
+    
+    # Create pose with current position but downward orientation
+    current_vec3 = geometry_pb2.Vec3(x=hand_x, y=hand_y, z=hand_z)
+    downward_pose_body = geometry_pb2.SE3Pose(position=current_vec3, rotation=body_Q_hand)
+    
+    # Transform to odom frame
+    odom_T_downward = odom_T_flat_body * math_helpers.SE3Pose.from_proto(downward_pose_body)
+    
+    # Move to downward orientation
+    orient_command = RobotCommandBuilder.arm_pose_command(
+        odom_T_downward.x, odom_T_downward.y, odom_T_downward.z,
+        odom_T_downward.rot.w, odom_T_downward.rot.x, odom_T_downward.rot.y, odom_T_downward.rot.z,
+        ODOM_FRAME_NAME, seconds=1.5
+    )
+    
+    # Execute orientation
+    command_client = spot._client._command_client
+    orient_cmd_id = command_client.robot_command(orient_command)
+    block_until_arm_arrives(command_client, orient_cmd_id, timeout_sec=2.0)
+    print('Downward orientation complete')
+    
+    # STEP 2: Now do the press (from current position down)
+    print('Preparing downward press trajectory...')
+    
+    # Define start and end positions - press down from current position
+    press_distance = 0.08  # Press down 8cm
     hand_vec3_start = geometry_pb2.Vec3(x=hand_x, y=hand_y, z=hand_z)
-    hand_vec3_end = geometry_pb2.Vec3(x=hand_x, y=hand_y, z=hand_z)  # Same position
+    hand_vec3_end = geometry_pb2.Vec3(x=hand_x, y=hand_y, z=hand_z - press_distance)
     
     # Create poses with downward orientation
     body_T_hand_start = geometry_pb2.SE3Pose(position=hand_vec3_start, rotation=body_Q_hand)
     body_T_hand_end = geometry_pb2.SE3Pose(position=hand_vec3_end, rotation=body_Q_hand)
     
     # Transform to odom frame
-    odom_T_flat_body = get_a_tform_b(robot_state.kinematic_state.transforms_snapshot,
-                                     ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
     odom_T_hand_start = odom_T_flat_body * math_helpers.SE3Pose.from_proto(body_T_hand_start)
     odom_T_hand_end = odom_T_flat_body * math_helpers.SE3Pose.from_proto(body_T_hand_end)
     
@@ -194,7 +229,7 @@ def execute_surface_contact_push(spot, config):
     
     # Execute the command
     proto = arm_surface_contact_service_pb2.ArmSurfaceContactCommand(request=cmd)
-    print('Executing arm surface contact - pressing straight down...')
+    print('Executing arm surface contact - pressing down...')
     arm_surface_contact_client.arm_surface_contact_command(proto)
     
     # Wait for completion
@@ -202,10 +237,9 @@ def execute_surface_contact_push(spot, config):
     
     # Return to ready position
     print('Moving arm back up to ready position...')
-    spot.unstow_arm()
+    # spot.unstow_arm()
     
     print('Button press completed')
-
 
 def push_button(config):
     """Main function to push a button with Spot."""
@@ -220,35 +254,41 @@ def push_button(config):
             print('Powering on robot...')
             spot.power_on()
             spot.stand_up()
+            spot.open_gripper()
             
             #  Walk to button location
             if not user_confirm_step("Walk to button location"):
-                return cleanup_and_exit(spot)
+                return cleanup_and_exit(spot, config.dock_id)
             walk_to_button_location(spot, config)
-            
-            # Step 2: Unstow arm
-            if not user_confirm_step("Unstow arm to ready position"):
-                return cleanup_and_exit(spot)
+
+            # open gripper
+            print (f"opening gripper now")
+            spot.open_gripper()
             spot.unstow_arm()
+
+            # # Gaze at the clicked pixel
+            # if not user_confirm_step("Gaze at point"):
+            #     return cleanup_and_exit(spot, config.dock_id)
+            # gaze_target = get_button_target(spot, config)
+            # spot.gaze_at_pixel(gaze_target, img_src=config.gaze_image_source)
+
+            spot.close_gripper()
             
-            # Step 3: Execute surface contact push
+            # Execute surface contact push
             if not user_confirm_step("Execute button push (down → push → up)"):
-                return cleanup_and_exit(spot)
+                return cleanup_and_exit(spot, config.dock_id)
             execute_surface_contact_push(spot, config)
-            
-            # Step 4: Stow arm
-            if not user_confirm_step("Step 4: Stow arm and finish"):
-                return cleanup_and_exit(spot)
-            spot.stow_arm()
-            
+
             print('Button push sequence completed successfully!')
             
+            cleanup_and_exit(spot, config.dock_id)
+
         except KeyboardInterrupt:
             print('Interrupted by user. Cleaning up...')
-            return cleanup_and_exit(spot)
+            return cleanup_and_exit(spot, config.dock_id)
         except Exception as e:
             print(f'Error occurred: {e}. Cleaning up...')
-            return cleanup_and_exit(spot)
+            return cleanup_and_exit(spot, config.dock_id)
 
 
 def main():
@@ -256,8 +296,11 @@ def main():
     parser = argparse.ArgumentParser(description='Push a button with Spot robot')
     parser.add_argument('--hostname', required=True, help='Spot robot hostname or IP')
     parser.add_argument('-i', '--image-source', 
-                        help='Camera source for button detection',
-                        default='frontleft_fisheye_image')
+                        help='Camera source for walk to object detection',
+                        default='hand_color_image')
+    parser.add_argument('-g', '--gaze-image-source', 
+                        help='Camera source for gazing detection',
+                        default='hand_color_image')
     parser.add_argument('-a', '--approach-distance', 
                         help='Distance to stop from target (meters)',
                         default=1, type=float)
@@ -267,7 +310,12 @@ def main():
     parser.add_argument('-t', '--press-duration', 
                         help='Duration to maintain downward force (seconds)',
                         default=1.0, type=float)
-    
+    parser.add_argument('--dock-id', 
+                    help='Docking station ID',
+                    default=521, type=int)
+    parser.add_argument('--walk-timeout', 
+                    help='time out for walking to a pixel',
+                    default=15.0, type=float)
     options = parser.parse_args()
     
     try:

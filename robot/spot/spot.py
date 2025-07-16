@@ -33,7 +33,7 @@ from bosdyn.api.geometry_pb2 import SE2VelocityLimit, SE2Velocity, Vec2
 from bosdyn.client import math_helpers
 from bosdyn.client.math_helpers import SE2Pose, SE3Pose
 from bosdyn.client.frame_helpers import get_se2_a_tform_b, get_a_tform_b, ODOM_FRAME_NAME, BODY_FRAME_NAME, VISION_FRAME_NAME
-from bosdyn.client.robot_command import RobotCommandBuilder
+from bosdyn.client.docking import DockingClient, blocking_dock_robot
 
 from google.protobuf import wrappers_pb2
 
@@ -113,7 +113,7 @@ class Spot:
         block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec)
         print(f"{self.id}: Arm stowed")
 
-    def walk_to_pixel(self, pixel_xy, img_src="hand_color_image", offset_distance=0.2):
+    def walk_to_pixel(self, pixel_xy, img_src="hand_color_image", offset_distance=0.2, timeout = 15):
         """Walk to a pixel location without grasping."""
         cx, cy = pixel_xy
         img_client = self._client._image_client
@@ -134,7 +134,7 @@ class Spot:
         # Wait for completion with timeout
         print(f"{self.id}: Walking to pixel ({cx}, {cy})...")
         start_time = time.time()
-        timeout_duration = 15.0
+        timeout_duration = timeout
         
         while True:
             time.sleep(0.25)
@@ -152,6 +152,27 @@ class Spot:
                 break
         
         return True
+    def dock(self, dock_id=521, timeout_sec=10.0):
+        """Dock the robot at the specified docking station."""
+        try:
+            print(f"{self.id}: Starting docking sequence...")
+            
+            # Stand up before docking
+            blocking_stand(self._client._command_client, timeout_sec=timeout_sec)
+            
+            # Initialize docking client if not already done
+            docking_client = self._client._spot.ensure_client(DockingClient.default_service_name)
+            
+            # Execute docking
+            blocking_dock_robot(self._client._spot, dock_id=dock_id)
+            
+            print(f"{self.id}: Robot docked successfully at station {dock_id}")
+            time.sleep(1)
+            return True
+            
+        except Exception as e:
+            print(f"{self.id}: Error during docking: {e}")
+            return False
 
     def align_to_box_with_pointcloud(self, region=None, angle_threshold_deg=5):
         """

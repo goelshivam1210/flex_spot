@@ -93,40 +93,15 @@ class SpotPerception:
             return None
         x1, y1, x2, y2, px, py = line
         
-        # Calculate line midpoint
-        # mid_x = (x1 + x2) // 2
-        # mid_y = (y1 + y2) // 2
-        
-        # 3. Look up valid depth at or near (cx, cy)
-        # depth, px, py = SpotPerception.get_depth_at_pixel(depth_img, mid_x, mid_y, search_radius=5)
-        
         if save_img:
             SpotPerception.save_markup_img(visual_img, line, id)
         
-        # # 5. Retrieve camera model from Spot's API
-        # image_client = self._spot.ensure_client(ImageClient.default_service_name)
-        # image_source = self.config.image_source
-        # # Get image source info to get camera intrinsics
-        # sources = image_client.list_image_sources()
-        # camera_model = None
-        # for src in sources:
-        #     if src.name == image_source:
-        #         camera_model = src.pinhole
-        #         break
-        # if camera_model is None:
-        #     print("Could not retrieve camera intrinsics for image source.")
-        #     return None
-        # 6. Compute (x, y, z) grasp point in camera frame if depth available, else return pixel coords and None
-        # if depth is not None:
-        #     grasp_point = self.pixel_to_camera_frame(px, py, depth, camera_model)
-        #     print(f"Detected grasp point in camera frame: {grasp_point}")
-        #     return grasp_point
-        # else:
-        #     print("No valid depth at or near edge midpoint. Returning pixel coordinates and None for depth.")
         return px, py
-        
     @staticmethod
     def save_markup_img(img, line, id, depth=None):
+        """
+        Save image with edge detection markup.
+        """
         img_mark = img.copy()
         x1, y1, x2, y2, px, py = line
         # Calculate line midpoint
@@ -135,9 +110,6 @@ class SpotPerception:
         # Draw the detected vertical edge as a green line
         cv2.line(img_mark, (x1, y1), (x2, y2), (0, 255, 0), 3)
         # Draw the grasp pixel (red dot). If valid depth found, use (px,py), else use (cx,cy)
-        # if depth is not None:
-        #     cv2.circle(img_mark, (px, py), 6, (0, 0, 255), -1)
-        # else:
         cv2.circle(img_mark, (px, py), 6, (0, 0, 255), -1)
         
         path = f"images/{id}_edge_and_depth_pixel.png"
@@ -262,6 +234,7 @@ class SpotPerception:
         z = depth
         return (x, y, z)
 
+    @staticmethod
     def get_target_from_user(img):
         """
         Displays an image from the robot's camera and waits for user to
@@ -286,6 +259,7 @@ class SpotPerception:
         print(f"g_image_click {g_image_click}")
         return g_image_click
 
+    @staticmethod
     def cv_mouse_callback(event, x, y, flags, param):
         global g_image_click, g_image_display
         clone = g_image_display.copy()
