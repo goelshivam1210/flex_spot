@@ -152,6 +152,88 @@ class Spot:
                 break
         
         return True
+    
+    def move_arm_to_position(self, target_position, timeout=3.0):
+        """Move arm to target position in vision frame."""
+        try:
+            # Get current robot state for frame info
+            robot_state = self._client._state_client.get_robot_state()
+            snapshot = robot_state.kinematic_state.transforms_snapshot
+            vision_T_hand = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
+            
+            if vision_T_hand is None:
+                raise Exception("Could not get current hand pose")
+            
+            # Create target pose (keep current orientation)
+            target_pose = SE3Pose(
+                x=target_position[0],
+                y=target_position[1], 
+                z=target_position[2],
+                rot=vision_T_hand.rot
+            )
+            
+            # Send arm command
+            arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
+                target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
+            )
+            cmd_id = self._client._command_client.robot_command(arm_cmd)
+            block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec=timeout)
+            
+            return True
+            
+        except Exception as e:
+            print(f"{self.id}: Error moving arm to position: {e}")
+            return False
+    def perform_wiggle_movements(self, interactive_perception, start_position=None):
+        """Perform wiggle movements and return trajectory for joint analysis."""
+        try:
+            # Get current hand position if not provided
+            if start_position is None:
+                robot_state = self._client._state_client.get_robot_state()
+                snapshot = robot_state.kinematic_state.transforms_snapshot
+                vision_T_hand = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
+                
+                if vision_T_hand is None:
+                    raise Exception("Could not get hand pose")
+                    
+                start_position = np.array([vision_T_hand.x, vision_T_hand.y, vision_T_hand.z])
+            
+            print(f"{self.id}: Starting wiggle movements from position: {start_position}")
+            
+            # Generate wiggle positions
+            wiggle_positions = interactive_perception.generate_wiggle_positions(start_position)
+            print(f"{self.id}: Generated {len(wiggle_positions)} wiggle positions")
+            
+            # Collect actual trajectory data
+            trajectory = []
+            
+            for i, target_pos in enumerate(wiggle_positions):
+                print(f"{self.id}: Moving to position {i+1}/{len(wiggle_positions)}")
+                
+                # Move to target position
+                if self.move_arm_to_position(target_pos):
+                    # Get actual achieved position
+                    time.sleep(0.5)  # Brief pause to settle
+                    robot_state = self._client._state_client.get_robot_state()
+                    snapshot = robot_state.kinematic_state.transforms_snapshot
+                    actual_hand_pose = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
+                    
+                    if actual_hand_pose:
+                        actual_position = np.array([actual_hand_pose.x, actual_hand_pose.y, actual_hand_pose.z])
+                        trajectory.append(actual_position)
+                    else:
+                        trajectory.append(target_pos)  # Fallback
+                else:
+                    trajectory.append(target_pos)  # Fallback
+            
+            trajectory = np.array(trajectory)
+            print(f"{self.id}: Collected trajectory with {len(trajectory)} points")
+            
+            return trajectory
+            
+        except Exception as e:
+            print(f"{self.id}: Error during wiggle movements: {e}")
+            return None   
     def dock(self, dock_id=521, timeout_sec=10.0):
         """Dock the robot at the specified docking station."""
         try:
