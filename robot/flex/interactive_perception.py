@@ -46,9 +46,9 @@ class InteractivePerception:
         # 4 directions: forward, backward, left, right
         directions = [
             np.array([self.movement_distance, 0, 0]),   # Forward
-            np.array([-self.movement_distance, 0, 0]),  # Backward  
+            np.array([-self.movement_distance, 0, 0]),  # Backward
+            np.array([0, -self.movement_distance, 0]),   # Right  
             np.array([0, self.movement_distance, 0]),   # Left
-            np.array([0, -self.movement_distance, 0])   # Right
         ]
         
         for direction in directions:
@@ -124,7 +124,7 @@ class InteractivePerception:
         if prismatic_error < revolute_error:
             self.joint_type = "prismatic"
             self.joint_params = {"axis": prismatic_axis, "error": prismatic_error}
-            print("→ Estimated joint type: PRISMATIC")
+            print("Estimated joint type: PRISMATIC")
         else:
             self.joint_type = "revolute" 
             self.joint_params = {
@@ -133,7 +133,7 @@ class InteractivePerception:
                 "axis": revolute_axis,
                 "error": revolute_error
             }
-            print("→ Estimated joint type: REVOLUTE")
+            print("Estimated joint type: REVOLUTE")
         
         return self.joint_type, self.joint_params
     

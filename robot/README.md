@@ -141,3 +141,13 @@ python estop_gui.py --ip <ROBOT_IP>
 ## License
 
 MIT License
+
+```bash
+python policies/door_open.py --hostname 192.168.1.101 --force-joint-type prismatic --max-steps 40 --action-scale 1.0 --success-distance 0.35
+```
+```bash
+python policies/door_open.py --hostname 192.168.1.101 --max-steps 10 --action-scale 0.1
+```
+```bash
+python policies/push_button.py --hostname 192.168.1.100 --approach-distance 0.9 --press-force-percentage 0.2
+```

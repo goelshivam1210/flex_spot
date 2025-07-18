@@ -97,7 +97,7 @@ class Spot:
         
         # Wait until the gripper command completes
         block_until_arm_arrives(self._client._command_client, cmd_id, timeout_sec=timeout_sec)
-        print(f"{self.id}: Gripper open complete.")
+        print(f"{self.id}: Gripper close complete.")
 
     def unstow_arm(self, timeout_sec=3.0):
         """Unstow arm to ready position."""
@@ -388,10 +388,13 @@ class Spot:
                                                     disable_vision_foot_constraint_avoidance=True,
                                                     obstacle_avoidance_padding=.001)
 
-        vx = dx/dt
-        vy = dy/dt
-        v_yaw = d_yaw/dt
+        # vx = dx/dt
+        # vy = dy/dt
+        # v_yaw = d_yaw/dt
 
+        vx = 0.5
+        vy = 0.5
+        v_yaw = 0.5
         speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
                 linear=Vec2(x=vx, y=vy), angular=v_yaw))        
         mobility_params = spot_command_pb2.MobilityParams(

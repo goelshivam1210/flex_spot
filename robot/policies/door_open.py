@@ -143,6 +143,7 @@ def analyze_door_joint(spot, config):
     
     for i, target_pos in enumerate(wiggle_positions):
         print(f"Moving to position {i+1}/{len(wiggle_positions)}")
+        # spot.close_gripper()
         
         try:
             # Create target pose (keep original orientation)
@@ -178,9 +179,23 @@ def analyze_door_joint(spot, config):
     
     trajectory = np.array(trajectory)
     print(f"Collected trajectory with {len(trajectory)} points")
+    spot.close_gripper()
     
     # Analyze trajectory
     joint_type, joint_params = interactive_perception.analyze_trajectory_and_estimate_joint(trajectory)
+
+    # We add this overiding logic as the prismatic joint on the box is not totally prosmatic hence we need to work more on the estimation.
+    if hasattr(config, 'force_joint_type') and config.force_joint_type:
+        print(f"\nOverriding detected joint type with user preference: {config.force_joint_type}")
+        
+        if config.force_joint_type == "prismatic":
+            # Use prismatic analysis results
+            prismatic_error, prismatic_axis = interactive_perception.prismatic_error_analysis(trajectory)
+            interactive_perception.joint_type = "prismatic"
+            interactive_perception.joint_params = {"axis": prismatic_axis, "error": prismatic_error}
+            joint_type = "prismatic"
+            joint_params = interactive_perception.joint_params    
+    print(f"Final joint type: {interactive_perception.joint_type}")
     
     print(f"\nJoint Analysis Results:")
     print(f"Estimated joint type: {joint_type}")
@@ -230,8 +245,25 @@ def execute_policy_opening(spot, config, interactive_perception):
         if len(action.shape) > 1:
             action = action.flatten()
         action[0] = -action[0]  # Invert x action direction for Spot
+        target_position = None
+        if interactive_perception.joint_type == "prismatic":
+            sliding_axis = interactive_perception.joint_params["axis"]
+            sliding_axis = sliding_axis / np.linalg.norm(sliding_axis)  # Normalize
+            
+            # Project the 3D action onto the 1D sliding direction
+            action_magnitude = np.dot(action, sliding_axis)
+            constrained_action = action_magnitude * sliding_axis
+            
+            print(f"Original action: {action}")
+            print(f"Sliding axis: {sliding_axis}")
+            print(f"Constrained action: {constrained_action}")
+            
+            target_position = current_hand_pos + (constrained_action * config.action_scale)
+        else:
+            # For revolute joints, use original 3D action
+            target_position = current_hand_pos + (action * config.action_scale)
         
-        target_position = current_hand_pos + (action * config.action_scale)
+        # target_position = current_hand_pos + (action * config.action_scale)
         
         print(f"Step {step+1}/{config.max_steps}: Target={target_position}")
         
@@ -247,9 +279,17 @@ def execute_policy_opening(spot, config, interactive_perception):
             arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
                 target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
             )
-            cmd_id = spot._client._command_client.robot_command(arm_cmd)
-            block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
-            
+            if interactive_perception.joint_type == "prismatic":
+                follow_arm_command = RobotCommandBuilder.follow_arm_command()
+                command = RobotCommandBuilder.build_synchro_command(follow_arm_command, arm_cmd)
+                cmd_id = spot._client._command_client.robot_command(command)
+                block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
+            else:
+                deltas = action * config.action_scale
+                d_yaw = np.radians(config.success_angle)/config.max_steps
+                print(f"deltas = {deltas} dyaws = {d_yaw}")
+                spot.push_object(dx=deltas[0],dy=deltas[1],d_yaw=d_yaw,dt=3)
+
             # Check success (existing logic)
             if check_manipulation_success(interactive_perception, initial_hand_pos, current_hand_pos, 
                                         {'distance': config.success_distance, 'angle': config.success_angle}):
@@ -263,31 +303,8 @@ def execute_policy_opening(spot, config, interactive_perception):
     
     print(f"Policy execution completed. Success: {manipulation_success}")
     time.sleep(2)  # Hold position to observe
-    # manipulation_success = True # will be removed once robust testing done
-    
-    # # Handle clearance for revolute joints (existing logic)
-    # if joint_type == "revolute":
-    #     print("Revolute joint detected - executing clearance...")
-    #     radius = interactive_perception.joint_params.get('radius', 0.3)
-    #     spot.push_object(dx=2*radius, dy=-radius)  # Use existing method
-    #     print("Clearance completed")
-    
+
     return True
-
-
-def execute_door_clearance(spot, interactive_perception):
-    if interactive_perception.joint_type == "revolute":
-        print("Executing door clearance maneuver...")
-        radius = interactive_perception.joint_params.get('radius', 0.3)
-        
-        # Move backward and LEFT to clear door swing
-        spot.push_object(dx=-radius, dy=radius)  # Both should be same sign for diagonal movement
-        # OR: Move more distinctly left
-        spot.push_object(dx=0.2, dy=radius)      # Forward slightly, left significantly
-        
-        print("Door clearance completed")
-        return True
-
 
 def check_manipulation_success(interactive_perception, initial_hand_pos, current_hand_pos, success_threshold):
     """Check if manipulation succeeded (existing logic)."""
@@ -311,6 +328,23 @@ def check_manipulation_success(interactive_perception, initial_hand_pos, current
     return False
 
 
+def execute_door_clearance(spot, interactive_perception):
+    if interactive_perception.joint_type == "revolute":
+        print("Executing door clearance maneuver...")
+        radius = interactive_perception.joint_params.get('radius', 0.3)
+
+        # Move backward-left diagonal (away from door swing)
+        spot.push_object(dx=-0.4, dy=0.6, dt=4)  # Back 40cm, left 60cm
+        
+        # # Move backward and LEFT to clear door swing
+        # spot.push_object(dx=-radius, dy=radius)  # Both should be same sign for diagonal movement
+        # # OR: Move more distinctly left
+        # spot.push_object(dx=0.2, dy=radius)      # Forward slightly, left significantly
+        
+        print("Door clearance completed")
+        return True
+
+
 def door_open(config):
     """Main function to open door with Spot."""
     
@@ -324,7 +358,8 @@ def door_open(config):
             print('Initializing robot...')
             spot.power_on()
             spot.stand_up()
-            
+            spot.open_gripper()
+            saved_yaw = spot.save_initial_yaw()
             # Walk to door and grasp handle
             if not user_confirm_step("Walk to door and grasp handle"):
                 return cleanup_and_exit(spot, config.dock_id)
@@ -334,6 +369,7 @@ def door_open(config):
             if not user_confirm_step("Perform wiggle analysis"):
                 return cleanup_and_exit(spot, config.dock_id)
             interactive_perception = analyze_door_joint(spot, config)
+            spot.return_to_saved_yaw(saved_yaw)
             
             # Execute policy-based door opening
             if not user_confirm_step("Execute intelligent door opening"):
@@ -393,6 +429,8 @@ def main():
                         type=float,
                         default=60.0,
                         help='Success threshold angle for revolute joints (degrees)')
+    parser.add_argument('--force-joint-type', choices=['prismatic', 'revolute'], 
+                       help='Force specific joint type (overrides detection)')
     
     options = parser.parse_args()
     
