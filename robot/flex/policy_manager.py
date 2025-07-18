@@ -1,6 +1,7 @@
 import os
 import numpy as np
 
+from flex.alg import TD3
 
 class PolicyManager:
     """
@@ -27,7 +28,6 @@ class PolicyManager:
         Returns:
             TD3 policy object
         """
-        from alg import TD3
         
         # Policy parameters (match your trained models)
         state_dim = 6

@@ -9,7 +9,7 @@ Push a button with Spot robot by:
 5. Stow arm
 
 run command with arguments:
-python button_push.py --hostname 192.168.1.101 --approach-distance 1 --press-force-percentage 0.05
+python push_button.py --hostname 192.168.1.101 --approach-distance 1 --press-force-percentage 0.05
 
 Author: Shivam Goel
 Date: July 2025

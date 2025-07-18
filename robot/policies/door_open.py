@@ -27,8 +27,8 @@ from bosdyn.client.math_helpers import SE3Pose
 
 # Import existing Spot modules
 from spot.spot import Spot, SpotPerception
-from interactive_perception import InteractivePerception
-from policy_manager import PolicyManager
+from flex.interactive_perception import InteractivePerception
+from flex.policy_manager import PolicyManager
 
 
 def user_confirm_step(step_description):
