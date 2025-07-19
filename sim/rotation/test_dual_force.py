@@ -573,7 +573,7 @@ def main():
     # Create test environments for both short segments and full arcs
     env_short = DualForceTestEnv(
         gui=args.render,
-        max_force=env_cfg.get("max_force", 300.0),
+        max_force=env_cfg.get("max_force", 400.0),
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.4),
         linear_damping=env_cfg.get("linear_damping", 0.05),
@@ -585,7 +585,7 @@ def main():
     
     env_full = DualForceTestEnv(
         gui=args.render,
-        max_force=env_cfg.get("max_force", 300.0),
+        max_force=env_cfg.get("max_force", 400.0),
         max_torque=env_cfg.get("max_torque", 50.0),
         friction=env_cfg.get("friction", 0.4),
         linear_damping=env_cfg.get("linear_damping", 0.05),

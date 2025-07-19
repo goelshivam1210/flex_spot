@@ -23,7 +23,7 @@ class SimplePathFollowingEnv(gym.Env):
     def __init__(
         self, 
         gui=False, 
-        max_force=300.0,       # Realistic for 65kg hollow plywood box
+        max_force=400.0,       # Realistic for 65kg hollow plywood box
         max_torque=50.0,
         friction=0.4,          # Plywood on floor
         linear_damping=0.05,   # Low damping for easier movement

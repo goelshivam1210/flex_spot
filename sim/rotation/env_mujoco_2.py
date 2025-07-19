@@ -78,6 +78,7 @@ class SimplePathFollowingEnv(gym.Env):
         self.box_body_id = self.model.body('box').id
         self.box_joint_id = self.model.joint('box_joint').id
         
+        # dt per timestep
         self.model.opt.timestep = 0.0025
         self.sim_steps = 10
         
@@ -247,18 +248,49 @@ class SimplePathFollowingEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
             
         state_after = self._get_state()
-        reward = self._calculate_reward(state_before, state_after)
+        reward, reward_comps = self._calculate_reward(state_before, state_after)
         
         progress = state_after[3]
         deviation = state_after[4]
+        orientation_error = abs(state_after[2])
+
         done = False
+        # if progress > 0.95 and deviation < self.goal_thresh:
+        #     done = True
+        #     # reward += self.goal_reward
+        #     if orientation_error < 0.2: # Check for low orientation error (~11 degrees)
+        #         reward += self.goal_reward
+        #     else:
+        #         # Reached the area but with bad orientation, penalize slightly
+        #         reward -= 10.0
+
+        # terminal‐state adjustment and record what happened
+        terminal_adj = 0.0
+        terminal_event = None
         if progress > 0.95 and deviation < self.goal_thresh:
             done = True
-            reward += self.goal_reward
+            if orientation_error < 0.2:
+                terminal_adj = self.goal_reward
+                reward += self.goal_reward
+                terminal_event = "success"
+            else:
+                terminal_adj = -10.0
+                reward -= 10.0
+                terminal_event = "orient_fail"
         
         truncated = self.steps >= self.max_steps
         
-        info = { "progress": progress, "deviation": deviation }
+        info = {
+            "progress":           progress,
+            "deviation":          deviation,
+            "lateral_error":      abs(state_after[0]),
+            "longitudinal_error": abs(state_after[1]),
+            "orientation_error":  orientation_error,
+            "speed_along_path":   state_after[5],
+            "reward_comps":       reward_comps,
+            "terminal_adjustment": terminal_adj,
+            "terminal_event":      terminal_event,
+        }
         
         return state_after, reward, done, truncated, info
 
@@ -291,19 +323,32 @@ class SimplePathFollowingEnv(gym.Env):
         # deviation_penalty = -3.0 * deviation
         # lateral_penalty = -2.0 * lateral_error
         # orientation_penalty = -1.0 * orientation_error
-        deviation_penalty = -2 * deviation
-        lateral_penalty = -2 * lateral_error
-        orientation_penalty = -2 * orientation_error    
+        deviation_penalty = -6 * deviation
+        lateral_penalty = -4 * lateral_error
+        orientation_penalty = -4 * orientation_error
+
+        adherence_reward = 0.5 * np.exp(-20.0 * deviation)    
         
         target_speed = 0.3
         speed_reward = -1.0 * abs(speed_along_path - target_speed)
         
-        total_reward = progress_reward + deviation_penalty + lateral_penalty + orientation_penalty + speed_reward
+        total_reward = progress_reward + deviation_penalty + lateral_penalty + orientation_penalty + speed_reward + adherence_reward
         
-        if progress_after > 0.95 and deviation < self.goal_thresh:
-            total_reward += 20.0
+        # goal_bonus = 0
+
+        # if progress_after > 0.95 and deviation < self.goal_thresh:
+        #     total_reward += 20.0
+        #     goal_bonus += 20
             
-        return float(total_reward)
+        return float(total_reward), {
+            "ProgressReward": progress_reward,
+            "DeviationPenalty": deviation_penalty,
+            "LateralPenalty": lateral_penalty,
+            "OrientationPenalty": orientation_penalty,
+            "SpeedReward": speed_reward,
+            "AdherenceReward": adherence_reward,
+            # "GoalBonus": goal_bonus
+        }
 
     def close(self):
         if self.viewer:
