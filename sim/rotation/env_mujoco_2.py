@@ -42,8 +42,10 @@ class SimplePathFollowingEnv(gym.Env):
         self.arc_start = kwargs.get('arc_start', -np.pi/3)
         self.arc_end = kwargs.get('arc_end', np.pi/3)
         self.spinning_friction = kwargs.get('spinning_friction', 0.01)
-        self.rolling_friction = kwargs.get('rolling_friction',  0.01)
-        self.strict_terminal = kwargs.get('strict_terminal',  False)
+        self.rolling_friction = kwargs.get('rolling_friction', 0.01)
+        self.strict_terminal = kwargs.get('strict_terminal', True)
+        self.spin_penalty_k = kwargs.get('spin_penalty_k', 0.0)
+        self.deviation_tolerance = kwargs.get('deviation_tolerance', 0.15)
 
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -251,7 +253,8 @@ class SimplePathFollowingEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
             
         state_after = self._get_state()
-        reward, reward_comps = self._calculate_reward(state_before, state_after)
+        angular_velocity_z = self.data.qvel[5]
+        reward, reward_comps = self._calculate_reward(state_before, state_after, angular_velocity_z)
         
         progress = state_after[3]
         deviation = state_after[4]
@@ -349,7 +352,7 @@ class SimplePathFollowingEnv(gym.Env):
         else:
             # no-op
             return None
-    def _calculate_reward(self, state_before, state_after):
+    def _calculate_reward(self, state_before, state_after, angular_velocity_z):
         progress_before, progress_after = state_before[3], state_after[3]
         deviation, lateral_error, orientation_error = state_after[4], abs(state_after[0]), abs(state_after[2])
         speed_along_path = state_after[5]
@@ -367,8 +370,12 @@ class SimplePathFollowingEnv(gym.Env):
         
         target_speed = 0.3
         speed_reward = -1.0 * abs(speed_along_path - target_speed)
+
+        # Close to 1 when deviation is low, close to 0 when it's high
+        progress_factor = np.exp(-5 * deviation / self.deviation_tolerance)
+        spin_penalty = -self.spin_penalty_k * (angular_velocity_z**2) * progress_factor
         
-        total_reward = progress_reward + deviation_penalty + lateral_penalty + orientation_penalty + speed_reward + adherence_reward
+        total_reward = progress_reward + deviation_penalty + lateral_penalty + orientation_penalty + speed_reward + adherence_reward + spin_penalty
         
         # goal_bonus = 0
 
@@ -383,7 +390,7 @@ class SimplePathFollowingEnv(gym.Env):
             "OrientationPenalty": orientation_penalty,
             "SpeedReward": speed_reward,
             "AdherenceReward": adherence_reward,
-            # "GoalBonus": goal_bonus
+            "SpinPenalty": spin_penalty,
         }
 
     def close(self):
