@@ -41,6 +41,9 @@ class SimplePathFollowingEnv(gym.Env):
         self.arc_radius = kwargs.get('arc_radius', 1.5)
         self.arc_start = kwargs.get('arc_start', -np.pi/3)
         self.arc_end = kwargs.get('arc_end', np.pi/3)
+        self.spinning_friction = kwargs.get('spinning_friction', 0.01)
+        self.rolling_friction = kwargs.get('rolling_friction',  0.01)
+        self.strict_terminal = kwargs.get('strict_terminal',  False)
 
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -65,8 +68,8 @@ class SimplePathFollowingEnv(gym.Env):
         # We use the 'friction' from config for sliding, and PyBullet's defaults for the others.
         friction_coeffs = np.array([
             self.friction,  # Use sliding friction from config (0.5)
-            0.01,           # Torsional (spinning) friction
-            0.01            # Rolling friction
+            self.spinning_friction,
+            self.rolling_friction
         ])
         
         # Apply these friction values to both the box and the floor
@@ -255,6 +258,8 @@ class SimplePathFollowingEnv(gym.Env):
         orientation_error = abs(state_after[2])
 
         done = False
+
+        # # STRICT VERSION, NO LOGS
         # if progress > 0.95 and deviation < self.goal_thresh:
         #     done = True
         #     # reward += self.goal_reward
@@ -264,19 +269,50 @@ class SimplePathFollowingEnv(gym.Env):
         #         # Reached the area but with bad orientation, penalize slightly
         #         reward -= 10.0
 
-        # terminal‐state adjustment and record what happened
-        terminal_adj = 0.0
+        # # STRICT VERSION, WITH LOGS
+        # terminal_adj = 0.0
+        # terminal_event = None
+        # if progress > 0.95 and deviation < self.goal_thresh:
+        #     done = True
+        #     if orientation_error < 0.2:
+        #         terminal_adj = self.goal_reward
+        #         reward += self.goal_reward
+        #         terminal_event = "success"
+        #     else:
+        #         terminal_adj = -10.0
+        #         reward -= 10.0
+        #         terminal_event = "orient_fail"
+
+        # # UNSTRICT VERSION WITH LOGS:
+        # terminal_adj = 0.0
+        # terminal_event = None
+        # if progress > 0.95 and deviation < self.goal_thresh:
+        #     done = True
+        #     terminal_adj = self.goal_reward
+        #     reward += self.goal_reward
+        #     terminal_event = "success"
+
+        # COMPREHENSIVE VERSION:
+        terminal_adj  = 0.0
         terminal_event = None
+
         if progress > 0.95 and deviation < self.goal_thresh:
             done = True
-            if orientation_error < 0.2:
-                terminal_adj = self.goal_reward
-                reward += self.goal_reward
-                terminal_event = "success"
+
+            if self.strict_terminal:
+                # orientation check enforced
+                if orientation_error < 0.2:
+                    terminal_adj = self.goal_reward
+                    terminal_event = "success"
+                else:
+                    terminal_adj = 0.1 * self.goal_reward
+                    terminal_event = "orient_fail"
             else:
-                terminal_adj = -10.0
-                reward -= 10.0
-                terminal_event = "orient_fail"
+                # disregard orientation
+                terminal_adj = self.goal_reward
+                terminal_event = "success"
+
+            reward += terminal_adj
         
         truncated = self.steps >= self.max_steps
         

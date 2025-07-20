@@ -637,6 +637,8 @@ def main():
                     )
                 result = test_episode(env, agent, mode, args.max_steps, render=args.render, recorder=recorder)
                 mode_results.append(result)
+                if recorder:
+                    recorder.close()
                 
                 # Add sleep for visualization
                 if args.render:

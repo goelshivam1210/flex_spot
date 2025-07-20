@@ -11,7 +11,7 @@
 
   <worldbody>
     <light pos="0 0 3" dir="0 0 -1" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2" directional="true"/>
-    <geom name="floor" size="5 5 0.1" type="plane" material="grid" solimp="0.9 0.95 0.001 0.5 2"/>
+    <geom name="floor" size="5 5 0.1" type="plane" material="grid" solimp="0.9 0.95 0.001 0.5 2" condim="4"/>
     
     <body name="box" pos="1.5 0 0.2">
       <freejoint name="box_joint"/>

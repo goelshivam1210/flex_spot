@@ -3,11 +3,14 @@ env:
   max_force: 400.0
   max_torque: 50.0
   friction: 0.5
+  spinning_friction: 0.05
+  rolling_friction: 0.01
   linear_damping: 0.05
   angular_damping: 0.1
   goal_pos: [2.0, 0.0]
   goal_thresh: 0.2
   segment_length: 0.3
+  strict_terminal: false
 
 agent:
   lr: 0.0001
@@ -23,16 +26,16 @@ agent:
   exploration_noise: 0.1
 
 training:
-  episodes: 10000
+  episodes: 2500
   start_timesteps: 2000
   save_freq: 500
   save_dir: "models/"
-  curriculum:
-    # - {until:  500, segment: 0.3}   # short slices  (status-quo)
-    # - {until: 1200, segment: 0.6}   # double length
-    # - {until: 1700, segment: 1.2}   # half of the 90° arc
-    # - {until: 9999, segment: null}  # whole arc afterwards
-    - {until: 2000, segment: 0.3}   # short slices  (status-quo)
-    - {until: 4500, segment: 0.6}   # double length
-    - {until: 7000, segment: 1.2}   # half of the 90° arc
-    - {until: 99999, segment: null}  # whole arc afterwards
+  # curriculum:
+  #   # - {until:  500, segment: 0.3}   # short slices  (status-quo)
+  #   # - {until: 1200, segment: 0.6}   # double length
+  #   # - {until: 1700, segment: 1.2}   # half of the 90° arc
+  #   # - {until: 9999, segment: null}  # whole arc afterwards
+  #   - {until: 2000, segment: 0.3}   # short slices  (status-quo)
+  #   - {until: 4500, segment: 0.6}   # double length
+  #   - {until: 7000, segment: 1.2}   # half of the 90° arc
+  #   - {until: 99999, segment: null}  # whole arc afterwards
