@@ -463,6 +463,17 @@ def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
     time.sleep(2.0)
 
     state, _ = env.reset()
+
+    viewer_is_active = False 
+    if render:
+        # env.viewer is the persistent object we need to manage
+        if env.enable_rendering():
+             viewer_is_active = True
+        else:
+            print("Failed to create viewer!")
+            return None
+        time.sleep(1.0) 
+
     
     for step in range(max_steps):
         if render and viewer and not viewer.is_running(): 
@@ -527,13 +538,18 @@ def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
     success = info['progress'] > 0.95 and info['deviation'] < env.goal_thresh
     print(f"Success: {'YES' if success else 'NO'}")
 
-    print("Episode complete. Viewer will stay open for 3 seconds...")
-    for i in range(3):
-        if viewer.is_running():
-            viewer.sync()
-            time.sleep(1.0)
-        else:
-            break
+    if render and viewer_is_active:
+        print("Episode complete. Closing viewer...")
+        env.close_viewer()
+
+    # if viewer is not None:
+    #     print("Episode complete. Viewer will stay open for 3 seconds...")
+    #     for i in range(3):
+    #         if viewer.is_running():
+    #             viewer.sync()
+    #             time.sleep(1.0)
+    #         else:
+    #             break
     
     return {
         'total_reward': total_reward,
