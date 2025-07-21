@@ -13,6 +13,7 @@ env:
   strict_terminal: true
   spin_penalty_k: 0.1
   deviation_tolerance: 0.15
+  action_rate_k: 0.1
 
 agent:
   lr: 0.0001
