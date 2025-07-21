@@ -47,7 +47,6 @@ class SimplePathFollowingEnv(gym.Env):
         self.spin_penalty_k = kwargs.get('spin_penalty_k', 0.0)
         self.deviation_tolerance = kwargs.get('deviation_tolerance', 0.15)
         self.action_rate_k = kwargs.get('action_rate_k', 0.0) # Default to 0 to disable
-        self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
 
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -101,6 +100,8 @@ class SimplePathFollowingEnv(gym.Env):
             high=np.array([1.0, 1.0, 1.0]), 
             dtype=np.float32
         )
+
+        self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
         
         self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
         self._make_training_segment()
