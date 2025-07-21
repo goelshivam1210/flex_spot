@@ -402,8 +402,8 @@ class SimplePathFollowingEnv(gym.Env):
         # deviation_penalty = -6 * deviation
         # adherence_reward = 0.5 * np.exp(-20.0 * deviation)
         adherence_reward = 0
-
-        deviation_penalty = -5.0 * (np.exp(5.0 * deviation) - 1.0)
+        clipped_deviation = min(deviation, 1.0)
+        deviation_penalty = -5.0 * (np.exp(5.0 * clipped_deviation) - 1.0)
         
         target_speed = 0.3
         speed_reward = -1.0 * abs(speed_along_path - target_speed)
