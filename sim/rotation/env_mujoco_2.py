@@ -106,6 +106,7 @@ class SimplePathFollowingEnv(gym.Env):
         self.prev_position = None
         self.prev_time = None
         self.steps = 0
+        self.last_closest_idx = 0
 
     def _generate_arc_path(self, radius=1.5, start_angle=-np.pi/3, end_angle=np.pi/3, num_points=50):
         points = []
@@ -169,6 +170,7 @@ class SimplePathFollowingEnv(gym.Env):
         self.steps = 0
         self.prev_position = np.array(start_pos[:2])
         self.prev_time = 0.0
+        self.last_closest_idx = 0
         
         if self.gui and self.viewer is None:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
@@ -182,11 +184,33 @@ class SimplePathFollowingEnv(gym.Env):
         
         orientation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz')[2]
         
-        dists = np.linalg.norm(self.path_points - current_position, axis=1)
-        closest_idx = np.argmin(dists)
+        # dists = np.linalg.norm(self.path_points - current_position, axis=1)
+        # closest_idx = np.argmin(dists)
+
+        search_start_idx = self.last_closest_idx
+        # Look ahead a reasonable number of points (e.g., 20) to prevent skipping sharp turns
+        search_end_idx = min(search_start_idx + 20, len(self.path_points))
+        
+        path_segment_to_search = self.path_points[search_start_idx:search_end_idx]
+        
+        # Ensure there's a path segment to search
+        if len(path_segment_to_search) > 0:
+            dists = np.linalg.norm(path_segment_to_search - current_position, axis=1)
+            # Find the index of the closest point WITHIN THE FORWARD SEGMENT
+            segment_closest_idx = np.argmin(dists)
+            # Convert back to the index on the full path
+            closest_idx = search_start_idx + segment_closest_idx
+        else:
+            # If we're at the end of the path, just use the last known index
+            closest_idx = self.last_closest_idx
+            
+        # Update the state for the next step
+        self.last_closest_idx = closest_idx
+
         closest_point = self.path_points[closest_idx]
         progress = closest_idx / (len(self.path_points) - 1)
-        deviation = dists[closest_idx]
+        # deviation = dists[closest_idx]
+        deviation = np.linalg.norm(current_position - closest_point)
         
         next_idx = min(closest_idx + 1, len(self.path_points) - 1)
         tangent = self.path_points[next_idx] - self.path_points[closest_idx]

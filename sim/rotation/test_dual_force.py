@@ -42,9 +42,11 @@ class VideoRecorder:
     """
     A class for offscreen video recording of a MuJoCo simulation.
     """
-    def __init__(self, model, data, output_path, width=800, height=600, fps=30):
+    def __init__(self, model, data, output_path, width=800, height=600, fps=30, path_points=None):
         self.model = model
         self.data = data
+        self.path_points_to_draw = path_points
+        self.num_path_markers = 0
         self.writer = imageio.get_writer(output_path, fps=fps)
         self.renderer = mujoco.Renderer(model, height, width)
 
@@ -65,6 +67,13 @@ class VideoRecorder:
         """
         # Tell the renderer to use our specific camera when updating the scene
         self.renderer.update_scene(self.data, camera=self.cam)
+        self.renderer.scene.ngeom -= self.num_path_markers
+
+        # Now, add the path markers to the scene
+        if self.path_points_to_draw is not None:
+            plot_path_markers(self.renderer.scene, self.path_points_to_draw)
+        
+        # Render the complete scene (robot + markers) and save to video
         pixels = self.renderer.render()
         self.writer.append_data(pixels)
 
@@ -433,6 +442,21 @@ def load_trained_model(model_path, env):
     agent.load_actor(os.path.dirname(model_path), os.path.basename(model_path).replace('_actor.pth', ''))
     return agent
 
+def plot_path_markers(scene, path_points):
+    """Adds markers to a given MjvScene to visualize the path."""
+    z_height = 0.02
+    for point in path_points:
+        if scene.ngeom >= scene.maxgeom:
+            break
+        mujoco.mjv_initGeom(
+            scene.geoms[scene.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([0.015, 0, 0]),
+            pos=np.array([point[0], point[1], z_height]),
+            mat=np.eye(3).flatten(),
+            rgba=np.array([1.0, 0.0, 0.0, 0.5])
+        )
+        scene.ngeom += 1
 
 def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
     """Run a single test episode"""
@@ -514,6 +538,17 @@ def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
         debug_data.append(log_entry)
         # -----------------------------
         
+        box_pos = env.data.body('box').xpos[:2]
+
+        # Find the index of the closest point on the path
+        dists = np.linalg.norm(env.path_points - box_pos, axis=1)
+        closest_idx = np.argmin(dists)
+        closest_path_point = env.path_points[closest_idx]
+
+        print(f"Step {step_count:3d}: "
+            f"Box Position=({box_pos[0]:.2f}, {box_pos[1]:.2f}) | "
+            f"Closest Path Point (idx {closest_idx})=({closest_path_point[0]:.2f}, {closest_path_point[1]:.2f}) | "
+            f"Deviation={info['deviation']:.3f}")
         if render:
             viewer.sync()
             time.sleep(0.01)
@@ -649,7 +684,8 @@ def main():
                         env.model,
                         env.data,
                         output_path,
-                        width=800, height=600, fps=40
+                        width=800, height=600, fps=40,
+                        path_points=env.path_points
                     )
                 result = test_episode(env, agent, mode, args.max_steps, render=args.render, recorder=recorder)
                 mode_results.append(result)

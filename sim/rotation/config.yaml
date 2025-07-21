@@ -11,7 +11,7 @@ env:
   goal_thresh: 0.2
   segment_length: 0.3
   strict_terminal: true
-  spin_penalty_k: 0.05
+  spin_penalty_k: 0.1
   deviation_tolerance: 0.15
 
 agent:
