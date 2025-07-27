@@ -46,7 +46,6 @@ class SimplePathFollowingEnv(gym.Env):
         self.strict_terminal = kwargs.get('strict_terminal', True)
         self.spin_penalty_k = kwargs.get('spin_penalty_k', 0.0)
         self.deviation_tolerance = kwargs.get('deviation_tolerance', 0.15)
-        self.action_rate_k = kwargs.get('action_rate_k', 0.0) # Default to 0 to disable
 
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -100,8 +99,6 @@ class SimplePathFollowingEnv(gym.Env):
             high=np.array([1.0, 1.0, 1.0]), 
             dtype=np.float32
         )
-
-        self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
         
         self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
         self._make_training_segment()
@@ -174,7 +171,6 @@ class SimplePathFollowingEnv(gym.Env):
         self.prev_position = np.array(start_pos[:2])
         self.prev_time = 0.0
         self.last_closest_idx = 0
-        self.last_action = np.zeros(self.action_space.shape, dtype=np.float32)
         
         if self.gui and self.viewer is None:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
@@ -255,10 +251,7 @@ class SimplePathFollowingEnv(gym.Env):
 
     def step(self, action):
         self.steps += 1
-
-        action_rate_penalty = -self.action_rate_k * np.sum((action - self.last_action)**2)
-        self.last_action = action.copy()
-
+        
         force_x = np.clip(action[0], -1, 1) * self.max_force
         force_y = np.clip(action[1], -1, 1) * self.max_force
         torque_z = np.clip(action[2], -1, 1) * self.max_torque
@@ -286,9 +279,6 @@ class SimplePathFollowingEnv(gym.Env):
         state_after = self._get_state()
         angular_velocity_z = self.data.qvel[5]
         reward, reward_comps = self._calculate_reward(state_before, state_after, angular_velocity_z)
-
-        reward += action_rate_penalty
-        reward_comps["ActionRatePenalty"] = action_rate_penalty
         
         progress = state_after[3]
         deviation = state_after[4]
@@ -396,14 +386,11 @@ class SimplePathFollowingEnv(gym.Env):
         # deviation_penalty = -3.0 * deviation
         # lateral_penalty = -2.0 * lateral_error
         # orientation_penalty = -1.0 * orientation_error
+        deviation_penalty = -6 * deviation
         lateral_penalty = -4 * lateral_error
         orientation_penalty = -4 * orientation_error
 
-        # deviation_penalty = -6 * deviation
-        # adherence_reward = 0.5 * np.exp(-20.0 * deviation)
-        adherence_reward = 0
-        clipped_deviation = min(deviation, 1.0)
-        deviation_penalty = -5.0 * (np.exp(5.0 * clipped_deviation) - 1.0)
+        adherence_reward = 0.5 * np.exp(-20.0 * deviation)    
         
         target_speed = 0.3
         speed_reward = -1.0 * abs(speed_along_path - target_speed)
