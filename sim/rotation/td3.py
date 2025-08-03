@@ -5,7 +5,6 @@ import torch.optim as optim
 import numpy as np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# device = "cpu"
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, max_action, max_torque):
@@ -13,8 +12,6 @@ class Actor(nn.Module):
         
         self.l1 = nn.Linear(state_dim, 400)
         self.l2 = nn.Linear(400, 300)
-        # self.l3 = nn.Linear(300, 2) 
-        # self.head = nn.Linear(300, 1)
         self.dir_head = nn.Linear(300, 2)  # unit‐vector force direction
         self.mag_head = nn.Linear(300, 1)  # force magnitude in [0,1]
         self.tau_head = nn.Linear(300, 1)  # signed torque in [−1,1]
@@ -23,26 +20,6 @@ class Actor(nn.Module):
         self.max_torque = max_torque
         
     def forward(self, state):
-    #     a = F.relu(self.l1(state))
-    #     a = F.relu(self.l2(a))
-
-    #     # Direction head output
-    #     direction = torch.tanh(self.l3(a))
-    #     direction = torch.nn.functional.normalize(direction, dim=1)
-        
-    #     # Scale head output
-    #     scale = F.sigmoid(self.head(a))
-        
-    #     # Combine for output as [dir_x, dir_y, scale]
-    #     action = torch.cat([direction, scale], dim=1)
-        
-    #     return action
-
-    #     # action_scale = F.sigmoid(self.head(a))
-    #     # a = torch.nn.functional.normalize(torch.tanh(self.l3(a))) * self.max_action *action_scale
-    #     # a = 
-    #     # return a
-
         x = F.relu(self.l1(state))
         x = F.relu(self.l2(x))
 
@@ -82,10 +59,11 @@ class Critic(nn.Module):
 
 
 class ReplayBuffer:
-    def __init__(self, max_size=5e5):
+    def __init__(self, max_size=5e5, rng = None):
         self.buffer = []
         self.max_size = int(max_size)
         self.size = 0
+        self.rng = rng if rng is not None else np.random.default_rng()
     
     def add(self, transition):
         self.size += 1
@@ -98,7 +76,7 @@ class ReplayBuffer:
             del self.buffer[0:int(self.size/5)]
             self.size = len(self.buffer)
         
-        indexes = np.random.randint(0, len(self.buffer), size=batch_size)
+        indexes = self.rng.randint(0, len(self.buffer), size=batch_size)
         state, action, reward, next_state, done = [], [], [], [], []
         
         for i in indexes:
@@ -219,8 +197,4 @@ class TD3:
     def load_actor(self, directory, name):
         self.actor.load_state_dict(torch.load('%s/%s_actor.pth' % (directory, name), map_location=lambda storage, loc: storage))
         self.actor_target.load_state_dict(torch.load('%s/%s_actor_target.pth' % (directory, name), map_location=lambda storage, loc: storage))
-        
-        
-        
-      
-        
+ 

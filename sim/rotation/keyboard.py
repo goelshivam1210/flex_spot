@@ -5,7 +5,7 @@ import mujoco
 import mujoco.viewer
 import yaml
 import glfw
-from env_mujoco import SimplePathFollowingEnv  # Update import name as needed
+from env import SimplePathFollowingEnv
 
 key_states = {
     # Movement keys
@@ -196,8 +196,10 @@ def keyboard_control():
                     print(f"Active: {', '.join(active_controls)}")
             
             if done or truncated:
-                if done: print(f"\n🎉 SUCCESS! Goal reached!")
-                else: print(f"\n⏰ Episode truncated.")
+                if done:
+                    print("\nSUCCESS! Goal reached!")
+                else:
+                    print("\n Episode truncated.")
                 state, _ = env.reset()
                 action.fill(0.0)
                 

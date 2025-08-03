@@ -27,10 +27,9 @@ import mujoco.viewer
 import time
 import argparse
 import yaml
-import contextlib
 from scipy.spatial.transform import Rotation
 
-from env_mujoco import SimplePathFollowingEnv
+from env import SimplePathFollowingEnv
 from td3 import TD3
 
 
@@ -93,7 +92,7 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         self.force_mode = "centroid"  # "centroid" or "contact"
         self.contact_points = None
         self.applied_contact_forces = None
-        self.current_segment = 0  # Track which segment we're on for stitching
+        self.current_segment = 0
         self.viewer = None
         self.render_enabled = False
     
@@ -153,7 +152,6 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         offset_x = -0.2   # Behind box center (rear face)
         offset_y = 0.2    # Left and right edges (wider spacing)
         offset_z = 0.0   # Ground level (bottom of box)
-        # offset_z = -0.02
         
         self.contact_points = np.array([
             [offset_x, +offset_y, offset_z],  # Left rear contact at ground level
@@ -281,7 +279,8 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         
         # Continue with rest of step method (same as parent)
         state_after = self._get_state()
-        reward = self._calculate_reward(state_before, state_after)
+        angular_velocity_z = self.data.qvel[5]
+        reward = self._calculate_reward(state_before, state_after, angular_velocity_z)
         
         progress = state_after[3]
         deviation = state_after[4]
@@ -324,104 +323,6 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         
         return state_after, reward, done, truncated, info
     
-    # def _apply_centroid_forces(self, force_x, force_y, torque_z):
-    #     """Apply forces at centroid (original method)"""
-    #     force_3d = [force_x, force_y, 0]
-    #     p.applyExternalForce(
-    #         self.box_id, -1, force_3d, [0, 0, 0], p.LINK_FRAME
-    #     )
-    #     p.applyExternalTorque(
-    #         self.box_id, -1, [0, 0, torque_z], p.LINK_FRAME
-    #     )
-    
-    # def _apply_contact_forces(self, wrench, pos, quat):
-    #     """Apply distributed contact forces (sim-to-real method)"""
-    #     # Convert wrench to contact forces
-    #     contact_forces = self._wrench_to_contact_forces(wrench)
-    #     self.applied_contact_forces = contact_forces.copy()
-        
-    #     # Get box orientation
-    #     euler = p.getEulerFromQuaternion(quat)
-    #     box_angle = euler[2]
-        
-    #     # Transform contact points from box frame to world frame
-    #     cos_a, sin_a = np.cos(box_angle), np.sin(box_angle)
-    #     rotation_matrix = np.array([
-    #         [cos_a, -sin_a, 0],
-    #         [sin_a,  cos_a, 0],
-    #         [0,      0,     1]
-    #     ])
-        
-    #     for i, (contact_point, force) in enumerate(zip(self.contact_points, contact_forces)):
-    #         # Transform contact point to world frame
-    #         world_contact_point = rotation_matrix @ contact_point
-            
-    #         # Apply force at contact point in world frame
-    #         # Transform force from box frame to world frame
-    #         world_force = rotation_matrix @ force
-            
-    #         p.applyExternalForce(
-    #             self.box_id, -1, 
-    #             force.tolist(),           # Box frame forces
-    #             contact_point.tolist(),   # Box frame positions  
-    #             p.LINK_FRAME             # Box frame application
-    #         )
-    
-    # def _draw_debug_info(self, pos, quat, force_x, force_y, torque_z):
-    #     """Enhanced debug visualization showing both force modes"""
-    #     # Call parent method for basic visualization
-    #     super()._draw_debug_info(pos, quat, force_x, force_y, torque_z)
-        
-    #     if self.force_mode == "contact" and self.contact_points is not None:
-    #         # Draw contact points and forces
-    #         euler = p.getEulerFromQuaternion(quat)
-    #         box_angle = euler[2]
-            
-    #         cos_a, sin_a = np.cos(box_angle), np.sin(box_angle)
-    #         rotation_matrix = np.array([
-    #             [cos_a, -sin_a, 0],
-    #             [sin_a,  cos_a, 0],
-    #             [0,      0,     1]
-    #         ])
-            
-    #         for i, contact_point in enumerate(self.contact_points):
-    #             # Transform contact point to world frame
-    #             world_contact_point = rotation_matrix @ contact_point
-    #             world_contact_pos = np.array(pos) + world_contact_point
-                
-    #             # Draw contact point (yellow sphere)
-    #             p.addUserDebugLine(
-    #                 world_contact_pos,
-    #                 world_contact_pos + [0, 0, 0.05],
-    #                 [1, 1, 0], 5, 0.1
-    #             )
-                
-    #             # Draw contact force vector if available
-    #             if self.applied_contact_forces is not None:
-    #                 force = self.applied_contact_forces[i]
-    #                 world_force = rotation_matrix @ force
-    #                 force_magnitude = np.linalg.norm(world_force)
-                    
-    #                 if force_magnitude > 1e-3:
-    #                     # Scale force for visualization
-    #                     force_scale = 0.5 / max(self.max_force, 1)
-    #                     force_end = world_contact_pos + world_force * force_scale
-                        
-    #                     # Draw force vector (cyan for contact forces)
-    #                     p.addUserDebugLine(
-    #                         world_contact_pos,
-    #                         force_end,
-    #                         [0, 1, 1], 4, 0.1
-    #                     )
-                        
-    #                     # Add force magnitude text
-    #                     p.addUserDebugText(
-    #                         f"F{i+1}: {force_magnitude:.1f}N",
-    #                         world_contact_pos + [0, 0, 0.1],
-    #                         textColorRGB=[0, 1, 1],
-    #                         textSize=0.8,
-    #                         lifeTime=0.1
-    #                     )
 
 def load_trained_model(model_path, env):
     """Load trained TD3 model"""
@@ -576,15 +477,6 @@ def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
     if render and viewer_is_active:
         print("Episode complete. Closing viewer...")
         env.close_viewer()
-
-    # if viewer is not None:
-    #     print("Episode complete. Viewer will stay open for 3 seconds...")
-    #     for i in range(3):
-    #         if viewer.is_running():
-    #             viewer.sync()
-    #             time.sleep(1.0)
-    #         else:
-    #             break
     
     return {
         'total_reward': total_reward,
@@ -725,7 +617,7 @@ def main():
     
     # Final comparison
     print(f"\n{'='*50}")
-    print(f"FINAL COMPARISON")
+    print("FINAL COMPARISON")
     print(f"{'='*50}")
     
     for env_name in envs.keys():
@@ -759,7 +651,7 @@ def main():
     env_full.close()
     if recorder:
         recorder.close()
-        print(f"✓ Wrote video to {args.record}")
+        print(f"Wrote video to {args.record}")
 
 if __name__ == "__main__":
     main()

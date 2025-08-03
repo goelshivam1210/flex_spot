@@ -3,23 +3,24 @@ import time
 import datetime
 import yaml
 import argparse
+import random
 
 import numpy as np
 import torch
 import gymnasium as gym
 
-from env_mujoco import SimplePathFollowingEnv
+from env import SimplePathFollowingEnv
 from td3 import TD3, ReplayBuffer
 
 from torch.utils.tensorboard import SummaryWriter
 
-def random_arc_generalization_test(env, agent, episodes=100):
+def random_arc_generalization_test(env, agent, rng, episodes=100):
     successes = 0
     for _ in range(episodes):
         # sample a random arc
-        r  = np.random.uniform(1.0, 2.0)
-        θ0 = np.random.uniform(-np.pi/2, 0)
-        θ1 = np.random.uniform(0, np.pi/2)
+        r  = rng.uniform(1.0, 2.0)
+        θ0 = rng.uniform(-np.pi/2, 0)
+        θ1 = rng.uniform(0, np.pi/2)
         env.test_full_arc = True
         env.arc_radius  = r
         env.arc_start   = θ0
@@ -69,9 +70,6 @@ def test_policy(env, agent, num_episodes=20, render=False):
                 env.render()
             
             if done or truncated:
-                # Check if the episode was successful
-                # This assumes the environment provides success info or we can infer it
-                # from the final state or reward
                 if done and info["progress"] > 0.95 and info["deviation"] < env.goal_thresh:
                     successes += 1
                 break
@@ -105,8 +103,18 @@ def main():
 
     # Set random seeds for reproducibility
     seed = args.seed
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    rng_replay = np.random.default_rng(seed + 10)
+    rng_exploration = np.random.default_rng(seed + 20)
+    rng_generalization_test = np.random.default_rng(seed + 30)
 
     # Create a timestamped run directory for this seed
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -131,17 +139,19 @@ def main():
     writer = SummaryWriter(logs_dir)
 
     env = SimplePathFollowingEnv(**env_cfg)
+    env.reset(seed=seed)
 
     test_env_full_cfg = env_cfg.copy()
     test_env_full_cfg['gui'] = args.render_test
     test_env_full_cfg['max_steps'] = 1000
     test_env_full = SimplePathFollowingEnv(**test_env_full_cfg)
+    test_env_full.reset(seed=seed + 1)
 
     test_env_short_cfg = env_cfg.copy()
     test_env_short_cfg['gui'] = args.render_test
     test_env_short_cfg['segment_length'] = None
     test_env_short = SimplePathFollowingEnv(**test_env_short_cfg)
-
+    test_env_short.reset(seed=seed + 2)
 
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -153,7 +163,7 @@ def main():
                 action_dim=action_dim,
                 max_action=max_action,
                 max_torque = env_cfg.get("max_torque", 50.0))
-    replay_buffer = ReplayBuffer(max_size=agent_cfg.get("replay_buffer_max_size", 5e5))
+    replay_buffer = ReplayBuffer(max_size=agent_cfg.get("replay_buffer_max_size", 5e5), rng=rng_replay)
 
     # Training parameters
     episodes = training_cfg.get("episodes", 1000)
@@ -194,16 +204,56 @@ def main():
                 action = env.action_space.sample()
             else:
                 action = agent.select_action(state).squeeze(0)
-                noise = np.random.normal(0, exploration_noise, size=action_dim)
+                noise = rng_exploration.normal(0, exploration_noise, size=action_dim)
                 action = np.clip(action + noise, env.action_space.low, env.action_space.high)
 
             # Step and store
-            next_state, reward, done, truncated, _ = env.step(action)
+            next_state, reward, done, truncated, info = env.step(action)
+            writer.add_scalar("Train/StepReward", reward, total_steps)
             episode_over = done or truncated
 
             replay_buffer.add((state, action, reward, next_state, float(done)))
             state = next_state
             ep_reward += reward
+
+            lateral_err = abs(state[0])
+            longitudinal_err = abs(state[1])
+            orientation_err = abs(state[2])
+            progress =  state[3]
+            deviation =  state[4]
+            speed_along_path =  state[5]
+
+            writer.add_scalar("Train/LateralError", lateral_err, total_steps)
+            writer.add_scalar("Train/LongitudinalError", longitudinal_err, total_steps)
+            writer.add_scalar("Train/OrientationError", orientation_err, total_steps)
+            writer.add_scalar("Train/Progress", progress, total_steps)
+            writer.add_scalar("Train/Deviation", deviation, total_steps)
+            writer.add_scalar("Train/SpeedAlongPath", speed_along_path, total_steps)
+
+            # action magnitudes
+            force_mag = np.linalg.norm(action[:2]) * env.max_force
+            torque_v = action[2] * env.max_torque
+            writer.add_scalar("Action/ForceMagnitude", force_mag, total_steps)
+            writer.add_scalar("Action/Torque", torque_v, total_steps)
+
+            for name, val in info["reward_comps"].items():
+                writer.add_scalar(f"Train/Reward/{name}", val, total_steps)
+
+            writer.add_scalar(
+                "Train/TerminalAdjustment",
+                info["terminal_adjustment"],
+                total_steps
+            )
+            writer.add_scalar(
+                "Train/GoalSuccess",
+                1 if info["terminal_event"] == "success" else 0,
+                total_steps
+            )
+            writer.add_scalar(
+                "Train/OrientFail",
+                1 if info["terminal_event"] == "orient_fail" else 0,
+                total_steps
+            )
 
             # TD3 update
             if replay_buffer.size > batch_size:
@@ -223,7 +273,10 @@ def main():
 
         # Log training reward
         print(f"[Ep {ep:4d}] Train Reward: {ep_reward:.2f}")
+
         writer.add_scalar("Train/EpisodeReward", ep_reward, ep)
+        writer.add_scalar("Train/EpisodeDeviation", deviation, ep)
+        writer.add_scalar("Train/EpisodeOrientation", orientation_err, ep)
         writer.add_scalar("Train/Steps", ep_steps, ep)
 
         # Periodic evaluation on both short segment & full arc
@@ -266,7 +319,7 @@ def main():
     agent.save(models_dir, "final_model")
 
     # Large-scale generalization test
-    gen_rate = random_arc_generalization_test(test_env_full, agent, episodes=100)
+    gen_rate = random_arc_generalization_test(test_env_full, agent, rng=rng_generalization_test, episodes=100)
     print(f"Random-Arc Generalization (100 trials): Success Rate={gen_rate:.2f}")
 
     # Clean up
