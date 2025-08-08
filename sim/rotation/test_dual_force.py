@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """
-Dual Force Application Test Script with Policy Stitching
+Dual Force Application Test Script (Full Arc Only)
 
-Tests how well the centroid-to-contact force transformation works with stitched policies:
+Tests a trained TD3 policy on a full arc path in two modes:
+1. Single centroid force application (current method)
+2. Distributed contact forces on rear face (sim-to-real method)
 
-1. For each short segment:
-   - Get centroid forces from micro-policy
-   - Transform to contact forces using _wrench_to_contact_forces
-   - Compare performance between direct centroid application vs transformed contact forces
-
-2. For full arc (stitched policies):
-   - Get centroid forces from sequence of micro-policies
-   - Transform each policy's output to contact forces
-   - Compare if the transformation works as well with stitched policies as with individual ones
-
-This validates that the mathematical transformation from centroid to contact forces
-works correctly both for individual micro-policies and when stitching them together.
+The arc path is always drawn in the GUI, and the box's trajectory is visualized as it follows the arc.
 """
 
 import os
@@ -137,6 +128,7 @@ class DualForceTestEnv(SimplePathFollowingEnv):
             self.viewer = None
             self.render_enabled = False
     
+
     def set_force_mode(self, mode):
         """Set force application mode: 'centroid' or 'contact'"""
         assert mode in ["centroid", "contact"], f"Invalid mode: {mode}"
@@ -146,32 +138,17 @@ class DualForceTestEnv(SimplePathFollowingEnv):
             self._setup_contact_points()
     
     def _setup_contact_points(self):
-        """Setup two contact points on the rear face at ground level"""
-        # Box is scaled by 0.4, so dimensions are ~0.4x0.4x0.4
-        # Contact points on rear face left and right sides at ground level
-        offset_x = -0.2   # Behind box center (rear face)
-        offset_y = 0.2    # Left and right edges (wider spacing)
-        offset_z = 0.0   # Ground level (bottom of box)
-        
+        offset_x = -0.2
+        offset_y = 0.2
+        offset_z = 0.0
         self.contact_points = np.array([
-            [offset_x, +offset_y, offset_z],  # Left rear contact at ground level
-            [offset_x, -offset_y, offset_z]   # Right rear contact at ground level
+            [offset_x, +offset_y, offset_z],
+            [offset_x, -offset_y, offset_z]
         ])
         print(f"Contact points setup: {self.contact_points}")
     
     def _wrench_to_contact_forces(self, wrench):
-        """
-        Convert centroid wrench [Fx, Fy, τz] to contact forces using pseudo-inverse method
-        
-        Args:
-            wrench: [Fx, Fy, τz] - force and torque at centroid
-            
-        Returns:
-            contact_forces: (2, 3) array of forces at each contact point
-        """
-        # For 2D case, we have Fx, Fy, τz
         Fx, Fy, tau_z = wrench[0], wrench[1], wrench[2]
-
         torque_cap = 2 * self.max_force * abs(self.contact_points[0,1])  # 2 pads, arm = |offset_y|
         tau_z = np.clip(tau_z, -torque_cap, torque_cap)
         
@@ -204,9 +181,7 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         # Solve using pseudo-inverse
         wrench_2d = np.array([Fx, Fy, tau_z])
         forces_flat = np.linalg.pinv(A) @ wrench_2d
-        
-        # Reshape to contact forces (2 contacts, 3D forces each)
-        contact_forces_2d = forces_flat.reshape(2, 2)  # [[f1x, f1y], [f2x, f2y]]
+        contact_forces_2d = forces_flat.reshape(2, 2)
         contact_forces = np.zeros((2, 3))
         contact_forces[:, :2] = contact_forces_2d  # Copy x,y forces
         contact_forces[:, 2] = 0  # z forces are zero
@@ -214,28 +189,18 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         return contact_forces
     
     def step(self, action):
-        """Override step to apply forces based on current mode"""
         self.steps += 1
-        
-        # Parse action to wrench
         force_x = np.clip(action[0], -1, 1) * self.max_force
         force_y = np.clip(action[1], -1, 1) * self.max_force
         torque_z = np.clip(action[2], -1, 1) * self.max_torque
-        
         wrench = np.array([force_x, force_y, torque_z])
-        
-        # Get state before applying forces
         state_before = self._get_state()
-        
-        # Apply forces based on mode
         for _ in range(self.sim_steps):
             # Check for numerical instability
             if np.any(np.isnan(self.data.qvel)) or np.any(np.isinf(self.data.qvel)):
                 print("Warning: Physics instability detected. Resetting velocity.")
                 self.data.qvel[:] = 0
                 break
-
-            # Apply forces based on mode
             if self.force_mode == "centroid":
                 box_quat = self.data.body('box').xquat
                 rot_matrix = Rotation.from_quat(box_quat[[1,2,3,0]]).as_matrix()
@@ -299,7 +264,6 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         truncated = False
         if self.steps >= self.max_steps:
             truncated = True
-        
         info = {
             "steps": self.steps,
             "progress": progress,
@@ -322,24 +286,19 @@ class DualForceTestEnv(SimplePathFollowingEnv):
                   f"Deviation={deviation:.3f}, Wrench=[{force_x:.1f}, {force_y:.1f}, {torque_z:.1f}]")
         
         return state_after, reward, done, truncated, info
-    
 
 def load_trained_model(model_path, env):
-    """Load trained TD3 model"""
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     max_action = float(env.action_space.high[0])
     max_torque = env.max_torque
-    
     agent = TD3(
-        lr=1e-3,  # Not used for inference
+        lr=1e-3,
         state_dim=state_dim,
         action_dim=action_dim,
         max_action=max_action,
         max_torque=max_torque
     )
-    
-    # Load only the actor for inference
     agent.load_actor(os.path.dirname(model_path), os.path.basename(model_path).replace('_actor.pth', ''))
     return agent
 
@@ -407,8 +366,6 @@ def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
         action = agent.select_action(np.array(state))
         if action.ndim > 1:
             action = action.squeeze(0)
-        
-        # Step environment
         state, reward, done, truncated, info = env.step(action)
         total_reward += reward
         step_count += 1
@@ -470,7 +427,6 @@ def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
     
     print(f"Episode finished: Steps={step_count}, Total Reward={total_reward:.2f}")
     print(f"Final Progress: {info['progress']:.3f}, Final Deviation: {info['deviation']:.3f}")
-    
     success = info['progress'] > 0.95 and info['deviation'] < env.goal_thresh
     print(f"Success: {'YES' if success else 'NO'}")
 
@@ -488,14 +444,14 @@ def test_episode(env, agent, mode, max_steps=500, render=False, recorder=None):
         'num_segments': len(segment_rewards)
     }
 
-
 def main():
-    parser = argparse.ArgumentParser(description="Test force transformation with stitched policies")
+    parser = argparse.ArgumentParser(description="Test force application methods on a full arc path")
+
     parser.add_argument("--model_path", type=str, required=True, 
                        help="Path to trained model (e.g., runs/run-0-2024.../models/best_model)")
     parser.add_argument("--config", type=str, default="config.yaml",
                        help="Path to config file")
-    parser.add_argument("--episodes", type=int, default=3,
+    parser.add_argument("--episodes", type=int, default=1,
                        help="Number of test episodes per mode")
     parser.add_argument("--max_steps", type=int, default=500,
                        help="Maximum steps per episode")
@@ -506,11 +462,8 @@ def main():
 
     
     args = parser.parse_args()
-    
-    # Load configuration
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
-    
     env_cfg = config["env"]
     
     # Create test environments for both short segments and full arcs
@@ -537,8 +490,6 @@ def main():
         max_steps=args.max_steps * 2,  # Longer for full arc
         segment_length=None  # No segment length for full arc testing
     )
-    
-    # Load trained model
     print(f"Loading model from: {args.model_path}")
     agent = load_trained_model(args.model_path, env_short)
     print("Model loaded successfully!")

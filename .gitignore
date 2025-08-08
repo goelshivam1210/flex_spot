@@ -83,3 +83,7 @@ results_2/
 .mypy_cache/
 .pytest_cache/
 /spot-sdk
+*.png
+*.jpg
+
+robot/images
