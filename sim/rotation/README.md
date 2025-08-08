@@ -1,6 +1,6 @@
 ## Learning force-based controllers for rigid body movement along curved paths
 
-This module trains path-following policies in PyBullet simulation with dual force application methods for sim-to-real transfer to multi-robot systems.
+This module trains path-following policies in MuJoCo simulation with dual force application methods for sim-to-real transfer to multi-robot systems.
 
 ---
 
@@ -19,7 +19,7 @@ State (8D Path-Relative):
      deviation, speed_along_path, box_forward_x, box_forward_y]
 
 Action (3D Wrench):
-    [force_x, force_y, torque_z] ∈ [-1,1]³ → [±300N, ±300N, ±50Nm]
+    [force_x, force_y, torque_z] ∈ [-1,1]³ → [±400N, ±400N, ±50Nm]
 
 Force Application Methods:
     1. Centroid: Single wrench at center of mass (simulation ideal)
@@ -70,9 +70,6 @@ python test_dual_force.py --model_path runs/run-2-2025-06-10_02-12-32/models/bes
 # Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# For Shivam's computer:
-source ../../../code/flex_spot/bin/activate
 ```
 
 #### Install Dependencies
@@ -80,7 +77,7 @@ source ../../../code/flex_spot/bin/activate
 pip install -r requirements.txt
 ```
 
-Required packages: PyBullet, PyTorch, NumPy, Gym, TensorBoard, YAML
+Required packages: MuJoCo, PyTorch, NumPy, Gymnasium, TensorBoard, PyYAML
 
 ---
 

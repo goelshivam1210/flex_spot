@@ -1,18 +1,15 @@
-# path_following_env.py
-
-import gym
+import gymnasium as gym
 import numpy as np
-import pybullet as p
-import pybullet_data
-import time
-from gym import spaces
-from scipy.interpolate import CubicSpline
+import mujoco
+import mujoco.viewer
+from gymnasium import spaces
+from scipy.spatial.transform import Rotation
 
 class SimplePathFollowingEnv(gym.Env):
     """
     Path Following Environment for Multi-Robot Sim-to-Real Transfer
     
-    A hollow plywood box (~65kg, 1x1x1.5m) follows a curved path using force vectors
+    A hollow plywood box (~65kg, 0.4x0.4x0.4m) follows a curved path using force vectors
     applied in the box reference frame. The state representation is path-relative 
     and includes box orientation vectors to enable multi-robot coordination.
     
@@ -20,577 +17,356 @@ class SimplePathFollowingEnv(gym.Env):
             deviation, speed_along_path, box_forward_x, box_forward_y] (8D)
     Action: [force_x, force_y, torque_z] (3D)
     """
-    def __init__(
-        self, 
-        gui=False, 
-        max_force=300.0,       # Realistic for 65kg hollow plywood box
-        max_torque=50.0,
-        friction=0.4,          # Plywood on floor
-        linear_damping=0.05,   # Low damping for easier movement
-        angular_damping=0.1,   # Low damping for easier rotation
-        goal_thresh=0.2, 
-        max_steps=500,
-        goal_reward=100,
-        seed=None,
-        segment_length=0.3,
-        test_full_arc=False,
-        arc_radius=1.5, arc_start=-np.pi/3, arc_end=np.pi/3
-    ):
-        super(SimplePathFollowingEnv, self).__init__()
-        
-        # Environment parameters
-        self.gui = gui
-        self.max_force = max_force
-        self.max_torque = max_torque
-        self.friction = friction
-        self.linear_damping = linear_damping
-        self.angular_damping = angular_damping
-        self.goal_thresh = goal_thresh
-        self.max_steps = max_steps
-        self.goal_reward = goal_reward
-        self.seed = seed
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 40}
 
-        # Simulation parameters
-        self.dt = 1.0 / 240.0
-        self.sim_steps = 6
-        self.angle_bin_size = 10.0  # degrees for discretization
-        self.num_bins = int(360/self.angle_bin_size)
-        self.arc_radius = arc_radius
-        self.arc_start = arc_start
-        self.arc_end = arc_end
+    def __init__(self, model_path='scene.xml', render_mode=None, **kwargs):
+        super(SimplePathFollowingEnv, self).__init__()
+        self.render_mode = render_mode
+
+        # Load parameters from kwargs, with defaults
+        self.gui = kwargs.get('gui', False)
+        self.max_force = kwargs.get('max_force', 400.0)
+        self.max_torque = kwargs.get('max_torque', 50.0)
+        self.goal_thresh = kwargs.get('goal_thresh', 0.2)
+        self.max_steps = kwargs.get('max_steps', 500)
+        self.goal_pos = kwargs.get('goal_pos', None) 
+        self.friction = kwargs.get('friction', 0.2)
+        self.goal_reward = kwargs.get('goal_reward', 100)
+        self.segment_length = kwargs.get('segment_length', 0.3)
+        self.test_full_arc = kwargs.get('test_full_arc', False)
+        self.arc_radius = kwargs.get('arc_radius', 1.5)
+        self.arc_start = kwargs.get('arc_start', -np.pi/3)
+        self.arc_end = kwargs.get('arc_end', np.pi/3)
+        self.spinning_friction = kwargs.get('spinning_friction', 0.01)
+        self.rolling_friction = kwargs.get('rolling_friction', 0.01)
+        self.strict_terminal = kwargs.get('strict_terminal', True)
+        self.spin_penalty_k = kwargs.get('spin_penalty_k', 0.0)
+        self.deviation_tolerance = kwargs.get('deviation_tolerance', 0.15)
+
+        # Load MuJoCo model
+        self.model = mujoco.MjModel.from_xml_path(model_path)
         
-        # Define observation space - 8 element enhanced state
-        self.observation_space = spaces.Box(
-            low=np.array([
-                -np.inf, -np.inf,  # lateral_error, longitudinal_error
-                -np.pi,            # orientation_error (discretized)
-                0.0,               # progress [0,1]
-                0.0,               # deviation [0,inf]
-                -np.inf,           # speed_along_path
-                -1.0, -1.0         # box_forward_x, box_forward_y (unit vector)
-            ]),
-            high=np.array([
-                np.inf, np.inf,    # lateral_error, longitudinal_error
-                np.pi,             # orientation_error (discretized)
-                1.0,               # progress [0,1]
-                np.inf,            # deviation [0,inf]
-                np.inf,            # speed_along_path
-                1.0, 1.0           # box_forward_x, box_forward_y (unit vector)
-            ]), 
-            dtype=np.float32
-        )
+        # Get the address of the first DoF for the box joint
+        dof_adr = self.model.joint('box_joint').dofadr[0]
+
+        # Set damping for the 3 translational (linear) DoFs
+        linear_damping = kwargs.get('linear_damping', 0.05)
+        self.model.dof_damping[dof_adr:dof_adr+3] = linear_damping
+
+        # Set damping for the 3 rotational (angular) DoFs
+        angular_damping = kwargs.get('angular_damping', 0.1)
+        self.model.dof_damping[dof_adr+3:dof_adr+6] = angular_damping
         
-        # Define action space - [force_x, force_y, torque_z]
+        # Get geom IDs for the box and floor
+        box_geom_id = self.model.geom('box_geom').id
+        floor_geom_id = self.model.geom('floor').id
+        
+        friction_coeffs = np.array([
+            self.friction,
+            self.spinning_friction,
+            self.rolling_friction
+        ])
+        
+        # Apply these friction values to both the box and the floor
+        self.model.geom_friction[box_geom_id] = friction_coeffs
+        self.model.geom_friction[floor_geom_id] = friction_coeffs 
+        self.data = mujoco.MjData(self.model)
+        self.viewer = None
+        
+        self.box_body_id = self.model.body('box').id
+        self.box_joint_id = self.model.joint('box_joint').id
+        
+        # dt per timestep
+        self.model.opt.timestep = 0.0025
+        self.sim_steps = 10
+        
+        self.angle_bin_size = 10.0
+        self.num_bins = int(360 / self.angle_bin_size)
+        
+        low = np.array([-np.inf, -np.inf, -np.pi, 0.0, 0.0, -np.inf, -1.0, -1.0], dtype=np.float32)
+        high = np.array([np.inf, np.inf, np.pi, 1.0, np.inf, np.inf, 1.0, 1.0], dtype=np.float32)
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+        
         self.action_space = spaces.Box(
             low=np.array([-1.0, -1.0, -1.0]), 
             high=np.array([1.0, 1.0, 1.0]), 
             dtype=np.float32
         )
         
-        # Connect to PyBullet
-        self._connect()
-        
-        # Generate arc path points
-        # self.path_points = self._generate_arc_path()
-        self.test_full_arc = test_full_arc
-        self.full_path = self._generate_arc_path(arc_radius, arc_start, arc_end)
-        
-        # slice a random training segment
-        self.segment_length = segment_length
+        self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
         self._make_training_segment()
 
-        # Previous position for speed calculation
         self.prev_position = None
         self.prev_time = None
-        
-        # Initialize state
         self.steps = 0
-        self.reset()
-    
-    def _connect(self):
-        """Connect to PyBullet physics server"""
-        if self.gui:
-            self.client = p.connect(p.GUI)
-            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        else:
-            self.client = p.connect(p.DIRECT)
-        
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.setTimeStep(self.dt)
-        p.setGravity(0, 0, -9.8)
+        self.last_closest_idx = 0
 
-    def _generate_random_path(self,
-                              num_waypoints=5,
-                              span=3.0,
-                              noise=0.2,
-                              num_points=200):
-        """
-        Build a random smooth path by:
-        sampling `num_waypoints` in a box [-span,span]^2
-        sorting them by x (or along some heuristic)
-        fitting a cubic spline through them, then
-        resampling `num_points` points along the spline
-        """
-        # sample waypoints
-        pts = np.random.uniform(-span, span, size=(num_waypoints, 2))
-        # sort by x so it “flows” forward
-        pts = pts[np.argsort(pts[:,0])]
-        # add little jitter so it isn’t exactly monotonic
-        pts[:,1] += np.random.randn(num_waypoints)*noise
-
-        # spline in x→y
-        xs, ys = pts[:,0], pts[:,1]
-        cs = CubicSpline(xs, ys, bc_type='natural')
-
-        # sample uniformly in x
-        x_min, x_max = xs.min(), xs.max()
-        xs_eval = np.linspace(x_min, x_max, num_points)
-        ys_eval = cs(xs_eval)
-
-        return np.stack([xs_eval, ys_eval], axis=1)
-    
     def _generate_arc_path(self, radius=1.5, start_angle=-np.pi/3, end_angle=np.pi/3, num_points=50):
-        """Generate points along an arc path"""
-        radius = 1.5
-        start_angle = -np.pi/3
-        end_angle = np.pi/3
-        num_points = 50
-        
         points = []
         for theta in np.linspace(start_angle, end_angle, num_points):
             x = radius * np.cos(theta)
             y = radius * np.sin(theta)
             points.append(np.array([x, y]))
-        
         return np.array(points)
-    
+
     def _make_training_segment(self):
-        """
-        Randomly slice a contiguous sub‐segment of length approximately self.segment_length
-        from the full path self.full_path. If segment_length is None or exceeds total path
-        length, we just use the entire path.
-        """
         full = self.full_path
         n = len(full)
         if self.segment_length is None:
             self.path_points = full.copy()
             return
 
-        # Compute cumulative arc‐length along the full path
-        disp = np.linalg.norm(np.diff(full, axis=0), axis=1)  # (n-1,)
-        cumlen = np.concatenate(([0.0], np.cumsum(disp)))     # (n,)
+        disp = np.linalg.norm(np.diff(full, axis=0), axis=1)
+        cumlen = np.concatenate(([0.0], np.cumsum(disp)))
 
         total_length = cumlen[-1]
         seg_len = self.segment_length
 
-        # If requested segment is too long, just use full path
         if seg_len >= total_length or n < 2:
             self.path_points = full.copy()
             return
 
-        # Randomly choose a starting arc‐length so that segment fits
-        start_dist = np.random.rand() * (total_length - seg_len)
+        start_dist = self.np_random.random() * (total_length - seg_len)
         end_dist = start_dist + seg_len
 
-        # Find the indices that bracket these distances
         i0 = np.searchsorted(cumlen, start_dist, side='right') - 1
         i1 = np.searchsorted(cumlen, end_dist, side='right')
         i0 = max(0, i0)
         i1 = min(n - 1, i1)
-
-        # Slice the points
         self.path_points = full[i0 : i1 + 1].copy()
-    
-    def reset(self):
-        """Reset the environment to its initial state"""
-        # if in “full‐arc test” mode, rebuild full_path and disable slicing
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+
         if self.test_full_arc:
             self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
             self.segment_length = None
         self._make_training_segment()
-        p.resetSimulation()
-        p.setGravity(0, 0, -9.8)
         
-        # Load the ground plane
-        self.plane_id = p.loadURDF("plane.urdf")
+        mujoco.mj_resetData(self.model, self.data)
         
-        # Create a hollow plywood box at the start of the path
-        start_pos = [self.path_points[0][0], self.path_points[0][1], 0.1]
-        start_ori = p.getQuaternionFromEuler([0, 0, 0])
+        start_pos = [self.path_points[0][0], self.path_points[0][1], 0.2]
         
-        # Using a default cube URDF with scaling to represent hollow plywood box
-        self.box_id = p.loadURDF("cube.urdf", start_pos, start_ori, globalScaling=0.4)
+        tangent = self.path_points[1] - self.path_points[0]
+        angle = np.arctan2(tangent[1], tangent[0])
+        start_quat = Rotation.from_euler('xyz', [0, 0, angle]).as_quat()
+        start_quat /= np.linalg.norm(start_quat)
         
-        # Set realistic physics properties for hollow plywood box (65kg)
-        p.changeDynamics(
-            self.box_id, -1, 
-            mass=65.0,  # Hollow plywood box mass
-            lateralFriction=self.friction, 
-            angularDamping=self.angular_damping,  # Lower for easier rotation
-            linearDamping=self.linear_damping,    # Lower for easier movement
-            rollingFriction=0.01,  # Much lower rolling friction
-            spinningFriction=0.01, # Much lower spinning friction
-            restitution=0.2        # Slight bounce for plywood
-        )
+        qpos = np.zeros(self.model.nq)
+        qpos[0:3] = start_pos
+        qpos[3:7] = [start_quat[3], start_quat[0], start_quat[1], start_quat[2]]
+        self.data.qpos[:] = qpos
+        self.data.qvel[:] = 0
         
-        # Set initial orientation to align with path direction
-        if len(self.path_points) > 1:
-            # Calculate tangent direction
-            tangent = self.path_points[1] - self.path_points[0]
-            angle = np.arctan2(tangent[1], tangent[0])
-            
-            # Set orientation
-            quat = p.getQuaternionFromEuler([0, 0, angle])
-            p.resetBasePositionAndOrientation(self.box_id, start_pos, quat)
-            
-            # Ensure zero initial velocity
-            p.resetBaseVelocity(self.box_id, [0, 0, 0], [0, 0, 0])
+        mujoco.mj_forward(self.model, self.data)
         
-        # Reset step counter and tracking variables
         self.steps = 0
         self.prev_position = np.array(start_pos[:2])
         self.prev_time = 0.0
+        self.last_closest_idx = 0
         
-        # Draw path for visualization in GUI mode
-        if self.gui:
-            self._draw_path()
+        if self.gui and self.viewer is None:
+            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
         
-        # Let the box settle briefly
-        for _ in range(5):
-            p.stepSimulation()
-        
-        # Return initial state
-        state = self._get_state()
-        return state, {}
-    
-    def _draw_path(self):
-        """Draw the path in the PyBullet GUI"""
-        if not self.gui:
-            return
-        
-        # Clear existing debug items
-        p.removeAllUserDebugItems()
-        
-        # Draw path points
-        path_color = [0, 0.5, 0.8]
-        for i in range(len(self.path_points) - 1):
-            p1 = [self.path_points[i][0], self.path_points[i][1], 0.01]
-            p2 = [self.path_points[i+1][0], self.path_points[i+1][1], 0.01]
-            p.addUserDebugLine(p1, p2, path_color, 2)
-    
+        return self._get_state(), {}
+
     def _get_state(self):
-        """Get the enhanced 8-element state vector"""
-        # Get box position and orientation
-        pos, quat = p.getBasePositionAndOrientation(self.box_id)
-        current_position = np.array(pos[:2])  # x, y position
+        pos = self.data.body('box').xpos
+        quat = self.data.body('box').xquat
+        current_position = pos[:2]
         
-        # Convert quaternion to yaw angle (around z-axis)
-        euler = p.getEulerFromQuaternion(quat)
-        orientation = euler[2]  # yaw angle
+        orientation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz')[2]
+
+        search_start_idx = self.last_closest_idx
+        # Look ahead a reasonable number of points (e.g., 20) to prevent skipping sharp turns
+        search_end_idx = min(search_start_idx + 20, len(self.path_points))
         
-        # Find closest point on the path
-        dists = np.linalg.norm(self.path_points - current_position, axis=1)
-        closest_idx = np.argmin(dists)
+        path_segment_to_search = self.path_points[search_start_idx:search_end_idx]
+        
+        # Ensure there's a path segment to search
+        if len(path_segment_to_search) > 0:
+            dists = np.linalg.norm(path_segment_to_search - current_position, axis=1)
+            # Find the index of the closest point WITHIN THE FORWARD SEGMENT
+            segment_closest_idx = np.argmin(dists)
+            # Convert back to the index on the full path
+            closest_idx = search_start_idx + segment_closest_idx
+        else:
+            # If we're at the end of the path, just use the last known index
+            closest_idx = self.last_closest_idx
+            
+        # Update the state for the next step
+        self.last_closest_idx = closest_idx
+
         closest_point = self.path_points[closest_idx]
-        
-        # Calculate progress along the path
-        progress = closest_idx / (len(self.path_points) - 1)
-        
-        # Calculate deviation from the path
-        deviation = dists[closest_idx]
-        
-        # Calculate path tangent and normal at closest point
+        num_path_points = len(self.path_points)
+
+        if num_path_points > 1:
+            progress = closest_idx / (num_path_points - 1)
+        else:
+            progress = 0.0
+
+        deviation = np.linalg.norm(current_position - closest_point)
         next_idx = min(closest_idx + 1, len(self.path_points) - 1)
         tangent = self.path_points[next_idx] - self.path_points[closest_idx]
         tangent_norm = np.linalg.norm(tangent)
-        if tangent_norm > 1e-8:
-            path_tangent = tangent / tangent_norm
-        else:
-            path_tangent = np.array([1.0, 0.0])  # Default forward direction
-        
-        # Path normal (perpendicular to tangent)
+        path_tangent = tangent / tangent_norm if tangent_norm > 1e-8 else np.array([1.0, 0.0])
         path_normal = np.array([-path_tangent[1], path_tangent[0]])
         
-        # Calculate position error in path coordinate system
         position_error = current_position - closest_point
-        lateral_error = np.dot(position_error, path_normal)      # perpendicular to path
-        longitudinal_error = np.dot(position_error, path_tangent)  # along path
+        lateral_error = np.dot(position_error, path_normal)
+        longitudinal_error = np.dot(position_error, path_tangent)
         
-        # Calculate desired orientation (tangent direction)
         desired_orientation = np.arctan2(path_tangent[1], path_tangent[0])
+        orientation_error = np.arctan2(np.sin(orientation - desired_orientation), np.cos(orientation - desired_orientation))
         
-        # Calculate orientation error and discretize it
-        orientation_error = np.arctan2(
-            np.sin(orientation - desired_orientation),
-            np.cos(orientation - desired_orientation)
-        )
-        
-        # Discretize orientation error
         bin_index = int(((orientation_error + np.pi) * 180/np.pi) / self.angle_bin_size) % self.num_bins
         discretized_orientation_error = (bin_index * self.angle_bin_size * np.pi/180) - np.pi
         
-        # Calculate speed along path
-        current_time = self.steps * self.dt * self.sim_steps
-        if self.prev_position is not None and self.prev_time is not None:
-            dt = current_time - self.prev_time
-            if dt > 1e-8:
-                velocity = (current_position - self.prev_position) / dt
-                speed_along_path = np.dot(velocity, path_tangent)
-            else:
-                speed_along_path = 0.0
+        current_time = self.steps * self.model.opt.timestep * self.sim_steps
+        dt = current_time - self.prev_time if self.prev_time is not None else 0
+        if dt > 1e-8:
+            velocity = (current_position - self.prev_position) / dt
+            speed_along_path = np.dot(velocity, path_tangent)
         else:
             speed_along_path = 0.0
-        
-        # Update previous position and time
+            
         self.prev_position = current_position.copy()
         self.prev_time = current_time
         
-        # Calculate box orientation vectors (box reference frame in world coordinates)
-        box_forward_x = np.cos(orientation)  # Box's forward direction
+        box_forward_x = np.cos(orientation)
         box_forward_y = np.sin(orientation)
         
-        # Return enhanced 8-element state vector
         state = np.array([
-            lateral_error,                    # [0] how far left/right of path
-            longitudinal_error,               # [1] how far ahead/behind on path
-            discretized_orientation_error,    # [2] heading vs path tangent (discretized)
-            progress,                         # [3] progress along path [0,1]
-            deviation,                        # [4] euclidean distance to path
-            speed_along_path,                 # [5] speed component along path
-            box_forward_x,                    # [6] box forward vector x-component
-            box_forward_y                     # [7] box forward vector y-component
+            lateral_error, longitudinal_error, discretized_orientation_error, progress, deviation,
+            speed_along_path, box_forward_x, box_forward_y
         ], dtype=np.float32)
         
         return state
-    
+
     def step(self, action):
-        """Execute an action in the environment."""
         self.steps += 1
         
-        # Parse action: [force_x, force_y, torque_z]
         force_x = np.clip(action[0], -1, 1) * self.max_force
         force_y = np.clip(action[1], -1, 1) * self.max_force
-        # For compatibility, add a max_torque attribute if not present
-        if not hasattr(self, "max_torque"):
-            self.max_torque = 50.0
         torque_z = np.clip(action[2], -1, 1) * self.max_torque
         
         # Get state before applying forces
         state_before = self._get_state()
         
-        # Apply force and torque to the box for multiple steps
         for _ in range(self.sim_steps):
-            # Get current position and velocity
-            pos, quat = p.getBasePositionAndOrientation(self.box_id)
-            vel, ang_vel = p.getBaseVelocity(self.box_id)
+            box_quat = self.data.body('box').xquat
+            rot_matrix = Rotation.from_quat([box_quat[1], box_quat[2], box_quat[3], box_quat[0]]).as_matrix()
 
-            # Check for numerical instability
-            if (np.any(np.isnan(pos)) or np.any(np.isinf(pos)) or
-                np.any(np.isnan(vel)) or np.any(np.isinf(vel))):
-                print("Warning: Physics instability detected. Resetting object velocity.")
-                p.resetBaseVelocity(self.box_id, [0, 0, 0], [0, 0, 0])
-                break
+            force_local = np.array([force_x, force_y, 0])
+            torque_local = np.array([0, 0, torque_z])
+            force_world = rot_matrix @ force_local
+            torque_world = rot_matrix @ torque_local
+            
+            wrench_world = np.concatenate([force_world, torque_world])
+            
+            # Re-apply the force before every single mj_step
+            self.data.xfrc_applied[self.box_body_id] = wrench_world
 
-            # Check for excessive velocity and dampen if needed
-            vel_magnitude = np.linalg.norm(vel)
-            if vel_magnitude > 8.0:  # Higher limit for lighter box
-                scale_factor = 8.0 / vel_magnitude
-                p.resetBaseVelocity(
-                    self.box_id,
-                    [vel[0] * scale_factor, vel[1] * scale_factor, vel[2] * scale_factor],
-                    [0, 0, 0]
-                )
-
-            # Apply force at center of mass in LINK_FRAME
-            force_3d = [force_x, force_y, 0]
-            p.applyExternalForce(
-                self.box_id,
-                -1,
-                force_3d,
-                [0, 0, 0],  # Relative position in link frame (center of mass)
-                p.LINK_FRAME  # Apply in box reference frame
-            )
-
-            # Apply torque around z-axis in box (link) frame
-            p.applyExternalTorque(
-                self.box_id,
-                -1,
-                [0, 0, torque_z],
-                p.LINK_FRAME
-            )
-
-            # Step simulation
-            p.stepSimulation()
-
-            # Enhanced visualization for GUI mode
-            if self.gui:
-                self._draw_debug_info(pos, quat, force_x, force_y, torque_z)
-        
-        # Get new state after action
+            # Step the simulation
+            mujoco.mj_step(self.model, self.data)
+            
         state_after = self._get_state()
+        angular_velocity_z = self.data.qvel[5]
+        reward, reward_comps = self._calculate_reward(state_before, state_after, angular_velocity_z)
         
-        # Calculate reward
-        reward = self._calculate_reward(state_before, state_after)
-        
-        # Extract state components
         progress = state_after[3]
         deviation = state_after[4]
-        
-        # Check if done
+        orientation_error = abs(state_after[2])
+
         done = False
-        
-        # Done if reached the end of the path
+
+        terminal_adj  = 0.0
+        terminal_event = None
+
         if progress > 0.95 and deviation < self.goal_thresh:
             done = True
-            # Add bonus reward for completing the path
-            reward += self.goal_reward
-            if self.gui:
-                print(f"Goal reached at step {self.steps}! Final reward: {reward:.2f}")
+
+            if self.strict_terminal:
+                # orientation check enforced
+                if orientation_error < 0.2:
+                    terminal_adj = self.goal_reward
+                    terminal_event = "success"
+                else:
+                    terminal_adj = 0.1 * self.goal_reward
+                    terminal_event = "orient_fail"
+            else:
+                # disregard orientation
+                terminal_adj = self.goal_reward
+                terminal_event = "success"
+
+            reward += terminal_adj
         
-        # Done if maximum steps reached
-        truncated = False
-        if self.steps >= self.max_steps:
-            truncated = True
-            if self.gui:
-                print(f"Max steps ({self.max_steps}) reached.")
+        truncated = self.steps >= self.max_steps
         
-        # Info dict with enhanced information
         info = {
-            "steps": self.steps,
-            "progress": progress,
-            "deviation": deviation,
-            "orientation_error": state_after[2],
-            "lateral_error": state_after[0],
-            "longitudinal_error": state_after[1],
-            "speed_along_path": state_after[5],
-            "box_forward_x": state_after[6],
-            "box_forward_y": state_after[7]
+            "progress":           progress,
+            "deviation":          deviation,
+            "lateral_error":      abs(state_after[0]),
+            "longitudinal_error": abs(state_after[1]),
+            "orientation_error":  orientation_error,
+            "speed_along_path":   state_after[5],
+            "reward_comps":       reward_comps,
+            "terminal_adjustment": terminal_adj,
+            "terminal_event":      terminal_event,
         }
         
-        # Display state information
-        if self.gui and self.steps % 10 == 0:
-            self._display_state_info(state_after, reward)
-        
         return state_after, reward, done, truncated, info
-    
-    def _draw_debug_info(self, pos, quat, force_x, force_y, torque_z):
-        """Draw comprehensive debug information in GUI mode (forces and torque)"""
-        current_pos = np.array(pos[:2])
-        
-        # Find closest point on path
-        dists = np.linalg.norm(self.path_points - current_pos, axis=1)
-        closest_idx = np.argmin(dists)
-        closest_point = self.path_points[closest_idx]
-        
-        # Draw current path connection (red line showing deviation)
-        p.addUserDebugLine(
-            [*closest_point, 0.05],
-            [pos[0], pos[1], 0.05],
-            [1, 0, 0], 1, 0.1
-        )
-        
-        # Get and draw box orientation
-        current_angle = p.getEulerFromQuaternion(quat)[2]
-        next_idx = min(closest_idx + 1, len(self.path_points) - 1)
-        tangent = self.path_points[next_idx] - self.path_points[closest_idx]
-        desired_angle = np.arctan2(tangent[1], tangent[0])
-        # current
-        p.addUserDebugLine(
-            [pos[0], pos[1], 0.05],
-            [pos[0] + 0.3*np.cos(current_angle), pos[1] + 0.3*np.sin(current_angle), 0.05],
-            [1, 0, 0], 3, 0.1
-        )
-        # desired
-        if np.linalg.norm(tangent) > 1e-8:
-            p.addUserDebugLine(
-                [pos[0], pos[1], 0.05],
-                [pos[0] + 0.3*np.cos(desired_angle), pos[1] + 0.3*np.sin(desired_angle), 0.05],
-                [0, 0, 1], 3, 0.1
+
+    def render(self):
+        if self.render_mode == "human":
+            if self.viewer and self.viewer.is_running():
+                self.viewer.sync()
+
+        elif self.render_mode == "rgb_array":
+            return self.model.render(
+                height=600,
+                width=800,
+                camera_id=0,
+                segmentation=False,
+                depth=False
             )
-        
-        # Draw applied force vector (green) in world frame
-        if np.hypot(force_x, force_y) > 1e-3:
-            world_fx = force_x*np.cos(current_angle) - force_y*np.sin(current_angle)
-            world_fy = force_x*np.sin(current_angle) + force_y*np.cos(current_angle)
-            scale = 0.5 / max(self.max_force, 1)
-            p.addUserDebugLine(
-                [pos[0], pos[1], 0.05],
-                [pos[0] + world_fx*scale, pos[1] + world_fy*scale, 0.05],
-                [0, 1, 0], 4, 0.1
-            )
-        
-        # Draw torque indicator (purple circle) scaled by magnitude of torque_z
-        if abs(torque_z) > 1e-3:
-            radius = 0.1 + 0.2 * (abs(torque_z)/max(self.max_torque,1))
-            color = [1, 0, 1] if torque_z > 0 else [0.5, 0, 0.5]
-            for i in range(8):
-                a1 = i*np.pi/4
-                a2 = (i+1)*np.pi/4
-                p1 = [pos[0] + radius*np.cos(a1), pos[1] + radius*np.sin(a1), 0.05]
-                p2 = [pos[0] + radius*np.cos(a2), pos[1] + radius*np.sin(a2), 0.05]
-                p.addUserDebugLine(p1, p2, color, 2, 0.1)
-        
-        # Draw path tangent & normal at closest point for debugging
-        if closest_idx < len(self.path_points)-1 and np.linalg.norm(tangent)>1e-8:
-            tn = tangent/np.linalg.norm(tangent)
-            nn = np.array([-tn[1], tn[0]])
-            p.addUserDebugLine([*closest_point,0.02], [closest_point[0]+0.2*tn[0], closest_point[1]+0.2*tn[1],0.02], [0,1,1],2,0.1)
-            p.addUserDebugLine([*closest_point,0.02], [closest_point[0]+0.2*nn[0], closest_point[1]+0.2*nn[1],0.02], [1,0,1],2,0.1)
-    
-    def _display_state_info(self, state, reward):
-        """Display enhanced state information in GUI"""
-        state_text = (
-            f"Lateral Error: {state[0]:.2f}\n"
-            f"Longitudinal Error: {state[1]:.2f}\n"
-            f"Orient Error: {state[2]:.2f}\n"
-            f"Progress: {state[3]:.2f}\n"
-            f"Deviation: {state[4]:.2f}\n"
-            f"Speed Along Path: {state[5]:.2f}\n"
-            f"Box Forward: ({state[6]:.2f}, {state[7]:.2f})\n"
-            f"Reward: {reward:.2f}"
-        )
-        
-        # Add text at the top of the screen
-        p.addUserDebugText(
-            state_text,
-            [0, 0, 1.5],  # Position above the scene
-            textColorRGB=[1, 1, 1],
-            textSize=1.0,
-            lifeTime=0.5
-        )
-    
-    def _calculate_reward(self, state_before, state_after):
-        """Calculate reward based on enhanced path following performance"""
-        # Extract relevant state components
-        progress_before = state_before[3]
-        progress_after = state_after[3]
-        deviation = state_after[4]
-        lateral_error = abs(state_after[0])
-        orientation_error = abs(state_after[2])
+
+        else:
+            return None
+
+    def _calculate_reward(self, state_before, state_after, angular_velocity_z):
+        progress_before, progress_after = state_before[3], state_after[3]
+        deviation, lateral_error, orientation_error = state_after[4], abs(state_after[0]), abs(state_after[2])
         speed_along_path = state_after[5]
         
-        # Progress reward - encourage forward movement
         progress_reward = 10.0 * (progress_after - progress_before)
+
+        deviation_penalty = -6 * deviation
+        lateral_penalty = -4 * lateral_error
+        orientation_penalty = -4 * orientation_error
+
+        adherence_reward = 0.5 * np.exp(-20.0 * deviation)    
         
-        # Path following rewards
-        deviation_penalty = -3.0 * deviation
-        lateral_penalty = -2.0 * lateral_error
-        orientation_penalty = -1.0 * orientation_error
-        
-        # Speed regulation - encourage reasonable speed along path
-        target_speed = 0.3  # m/s
+        target_speed = 0.3
         speed_reward = -1.0 * abs(speed_along_path - target_speed)
+
+        # Close to 1 when deviation is low, close to 0 when it's high
+        progress_factor = np.exp(-5 * deviation / self.deviation_tolerance)
+        spin_penalty = -self.spin_penalty_k * (angular_velocity_z**2) * progress_factor
         
-        # Combine rewards
-        total_reward = (progress_reward + deviation_penalty + 
-                       lateral_penalty + orientation_penalty + speed_reward)
-        
-        # Goal completion bonus
-        if progress_after > 0.95 and deviation < self.goal_thresh:
-            total_reward += 20.0
-        
-        return float(total_reward)
-    
+        total_reward = progress_reward + deviation_penalty + lateral_penalty + orientation_penalty + speed_reward + adherence_reward + spin_penalty
+            
+        return float(total_reward), {
+            "ProgressReward": progress_reward,
+            "DeviationPenalty": deviation_penalty,
+            "LateralPenalty": lateral_penalty,
+            "OrientationPenalty": orientation_penalty,
+            "SpeedReward": speed_reward,
+            "AdherenceReward": adherence_reward,
+            "SpinPenalty": spin_penalty,
+        }
+
     def close(self):
-        """Close the environment"""
-        p.disconnect()
+        if self.viewer:
+            self.viewer.close()
+            self.viewer = None
