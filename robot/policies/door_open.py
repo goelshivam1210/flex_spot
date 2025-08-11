@@ -344,6 +344,10 @@ def execute_door_clearance(spot, interactive_perception):
         print("Door clearance completed")
         return True
 
+def door_open_pixel_location(x_pix, y_pix):
+    print(f"door_open called with pixel coordinates: {x_pix}, {y_pix}")
+    # TODO: implement this function
+    return True
 
 def door_open(config):
     """Main function to open door with Spot."""

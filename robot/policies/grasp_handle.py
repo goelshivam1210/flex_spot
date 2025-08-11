@@ -128,6 +128,10 @@ def walk_to_door_and_grasp(spot, config):
     
     return target_pixel
 
+def grasp_handle_pixel_location(x_pix, y_pix):
+    print(f"grasp_handle called with pixel coordinates: {x_pix}, {y_pix}")
+    # TODO: implement this function
+    return True
 
 def grasp_handle(config):
     """Main function to open door with Spot."""

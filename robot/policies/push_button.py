@@ -241,6 +241,11 @@ def execute_surface_contact_push(spot, config):
     
     print('Button press completed')
 
+def push_button_pixel_location(x_pix, y_pix):
+    print(f"push_button_pixel_location called with pixel coordinates: {x_pix}, {y_pix}")
+    # TODO: implement this function
+    return True
+
 def push_button(config):
     """Main function to push a button with Spot."""
     
