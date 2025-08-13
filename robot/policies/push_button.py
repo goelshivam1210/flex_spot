@@ -19,6 +19,7 @@ import argparse
 import sys
 import time
 import numpy as np
+from sklearn.utils import Bunch
 
 from bosdyn.api import (arm_surface_contact_pb2, arm_surface_contact_service_pb2, 
                         geometry_pb2, trajectory_pb2)
@@ -241,9 +242,57 @@ def execute_surface_contact_push(spot, config):
     
     print('Button press completed')
 
-def push_button_pixel_location(x_pix, y_pix):
-    print(f"push_button_pixel_location called with pixel coordinates: {x_pix}, {y_pix}")
-    # TODO: implement this function
+def push_button_pixel_location(x_pix, y_pix, config):
+    print(f"push_button_pixel_location called with pixel coordinates: {x_pix}, {y_pix}, {config}")
+
+    # Initialize robot using your existing class
+    spot = Spot(id="ButtonPush", hostname=config.hostname)
+    spot.start()
+
+    # display target pixel and wait for user approval -- for debugging
+    result = spot.take_picture(color_src=config.image_source, save_images=True)
+    if isinstance(result, tuple):
+        color_img = result[0]
+    else:
+        color_img = result
+
+    should_continue = SpotPerception.display_pixel_selection(color_img, x_pix, y_pix, True)
+    if not should_continue:
+        return False
+
+    # get spot lease and execute policy
+    with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
+        try:
+            # Power on and stand up
+            print('Powering on robot...')
+            spot.power_on()
+            spot.stand_up()
+            spot.open_gripper()
+
+            #  Walk to button location
+            target_pixel = (x_pix, y_pix)
+            spot.walk_to_pixel(target_pixel,
+                               img_src=config.image_source,
+                               offset_distance=config.approach_distance, timeout=config.walk_timeout)
+
+            # open gripper
+            print(f"opening gripper now")
+            spot.open_gripper()
+            spot.unstow_arm()
+
+            spot.close_gripper()
+
+            # Execute surface contact push
+            execute_surface_contact_push(spot, config)
+
+            print('Button push sequence completed successfully!')
+
+            spot.stow_arm()
+
+        except Exception as e:
+            print(f'Error occurred: {e}')
+            return False
+
     return True
 
 def push_button(config):

@@ -276,3 +276,21 @@ class SpotPerception:
             cv2.line(clone, (0, y), (width, y), color, thickness)
             cv2.line(clone, (x, 0), (x, height), color, thickness)
             cv2.imshow(image_title, clone)
+
+    @staticmethod
+    def display_pixel_selection(img, x, y, wait):
+        img_copy = img.copy()
+        color = (30, 30, 30)
+        thickness = 2
+        image_title = 'Target pixel'
+        height = img_copy.shape[0]
+        width = img_copy.shape[1]
+        cv2.line(img_copy, (0, y), (width, y), color, thickness)
+        cv2.line(img_copy, (x, 0), (x, height), color, thickness)
+        cv2.imshow(image_title, img_copy)
+        if wait:
+            key = cv2.waitKey(0) & 0xFF
+            if key == ord('q') or key == ord('Q'):
+                return False
+
+        return True
