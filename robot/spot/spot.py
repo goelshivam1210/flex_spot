@@ -44,11 +44,11 @@ from .spot_perception import SpotPerception
 class Spot:
     """Manages connection, state, and actions for a single robot."""
 
-    def __init__(self, id, hostname, config=None):  #TODO Delete config
+    def __init__(self, id, username, password, hostname, config=None):  #TODO Delete config
         self.id = id
         self.config = config
 
-        self._client = SpotClient(id, hostname)
+        self._client = SpotClient(id, username, password, hostname)
         self._camera = SpotCamera(id, self._client)
 
         self.target_point = None
@@ -563,6 +563,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--username", required=True, help="Spot username for authentication")
+    parser.add_argument("--password", required=True, help="Spot password for authentication")
     parser.add_argument("--hostname", required=True, help="Spot robot hostname or IP")
     parser.add_argument(
         "--image-source", 
@@ -593,7 +595,7 @@ if __name__ == "__main__":
     hand_img_src = "hand_color_image"
     hand_depth_src = "hand_depth_in_hand_color_frame"
 
-    spot = Spot(id="Spot", hostname=args.hostname, config=config)
+    spot = Spot(id="Spot", username=args.username, password=args.password, hostname=args.hostname, config=config)
 
     spot.start()
 

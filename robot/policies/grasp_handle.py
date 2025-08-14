@@ -6,7 +6,7 @@ The system works in 3 phases:
 3. Phase 3: Release and cleanup
 
 Example usage:
-    python door_open.py --hostname 192.168.1.100 --max-steps 15 --action-scale 0.05
+    python door_open.py --username <username> --password <password> --hostname <ip-address> --max-steps 15 --action-scale 0.05
 
 Author: Shivam Goel
 Date: July 2025
@@ -132,7 +132,7 @@ def grasp_handle_pixel_location(x_pix, y_pix, config):
     print(f"grasp_handle called with pixel coordinates: {x_pix}, {y_pix}")
 
     # Initialize robot
-    spot = Spot(id="GraspHandle", hostname=config.hostname)
+    spot = Spot(id="GraspHandle", username=config.username, password=config.password, hostname=config.hostname)
     spot.start()
 
     # display target pixel and wait for user approval -- for debugging
@@ -153,7 +153,6 @@ def grasp_handle_pixel_location(x_pix, y_pix, config):
             print('Initializing robot...')
             spot.power_on()
             spot.stand_up()
-            spot.open_gripper()
 
             # Walk to door and grasp handle
             spot.open_gripper()
@@ -173,7 +172,7 @@ def grasp_handle(config):
     """Main function to open door with Spot."""
     
     # Initialize robot
-    spot = Spot(id="GraspHandle", hostname=config.hostname)
+    spot = Spot(id="GraspHandle", username=config.username, password=config.password, hostname=config.hostname)
     spot.start()
     
     with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
@@ -202,7 +201,9 @@ def grasp_handle(config):
 
 def main():
     """Command line interface."""
-    parser = argparse.ArgumentParser(description='Open door with Spot robot')
+    parser = argparse.ArgumentParser(description='Grasp handle with Spot robot')
+    parser.add_argument("--username", required=True, help="Spot username for authentication")
+    parser.add_argument("--password", required=True, help="Spot password for authentication")
     parser.add_argument('--hostname', required=True, help='Spot robot hostname or IP')
     parser.add_argument('--image-source', 
                         default='hand_color_image',

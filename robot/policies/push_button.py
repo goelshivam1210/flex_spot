@@ -9,7 +9,7 @@ Push a button with Spot robot by:
 5. Stow arm
 
 run command with arguments:
-python push_button.py --hostname 192.168.1.101 --approach-distance 1 --press-force-percentage 0.05
+python push_button.py --username <username> --password <password> --hostname <ip-address> --approach-distance 1 --press-force-percentage 0.05
 
 Author: Shivam Goel
 Date: July 2025
@@ -246,7 +246,7 @@ def push_button_pixel_location(x_pix, y_pix, config):
     print(f"push_button_pixel_location called with pixel coordinates: {x_pix}, {y_pix}, {config}")
 
     # Initialize robot using your existing class
-    spot = Spot(id="ButtonPush", hostname=config.hostname)
+    spot = Spot(id="ButtonPush", username=config.username, password=config.password, hostname=config.hostname)
     spot.start()
 
     # display target pixel and wait for user approval -- for debugging
@@ -299,7 +299,7 @@ def push_button(config):
     """Main function to push a button with Spot."""
     
     # Initialize robot using your existing class
-    spot = Spot(id="ButtonPush", hostname=config.hostname)
+    spot = Spot(id="ButtonPush", username=config.username, password=config.password, hostname=config.hostname)
     spot.start()
     
     with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
@@ -348,6 +348,8 @@ def push_button(config):
 def main():
     """Command line interface."""
     parser = argparse.ArgumentParser(description='Push a button with Spot robot')
+    parser.add_argument("--username", required=True, help="Spot username for authentication")
+    parser.add_argument("--password", required=True, help="Spot password for authentication")
     parser.add_argument('--hostname', required=True, help='Spot robot hostname or IP')
     parser.add_argument('-i', '--image-source', 
                         help='Camera source for walk to object detection',

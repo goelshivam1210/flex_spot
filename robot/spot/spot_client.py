@@ -16,8 +16,10 @@ class SpotClient:
     """
     Handles Spot's connection
     """
-    def __init__(self, id, hostname):
+    def __init__(self, id, username, password, hostname):
         self.id = id
+        self.username = username
+        self.password = password
         self.hostname = hostname
 
         self._sdk = None
@@ -52,7 +54,7 @@ class SpotClient:
         try:
             self._sdk = create_standard_sdk(f'Controller_{self.id}')
             self._spot = self._sdk.create_robot(self.hostname)
-            util.authenticate(self._spot)
+            self._spot.authenticate(self.username, self.password)
             self._spot.time_sync.wait_for_sync()
             print(f"{self.id}: Connection successful.")
             return True

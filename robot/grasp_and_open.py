@@ -10,7 +10,7 @@ As an additional step in phase 2, the robot will return to a clearance yaw pose
 and then finally it will dock itself.
 
 Example usage:
-    python grasp_and_open.py --hostname 192.168.1.100 --max-steps 15 --action-scale 0.05
+    python grasp_and_open.py --username <username> --password <password> --hostname <ip-address> --max-steps 15 --action-scale 0.05
 
 Author: Shivam Goel
 Date: July 2025
@@ -46,10 +46,10 @@ class InteractiveSpotController:
     Main controller that integrates Spot robot with interactive perception.
     """
     
-    def __init__(self, hostname, dock_id=521, image_source="hand_color_image", 
+    def __init__(self, username, password, hostname, dock_id=521, image_source="hand_color_image",
                  depth_source="hand_depth_in_hand_color_frame"):
         # Initialize robot
-        self.spot = Spot(id="Interactive_Spot", hostname=hostname)
+        self.spot = Spot(id="Interactive_Spot", username=username, password=password, hostname=hostname)
         self._docking_client = None
         self.dock_id = dock_id
 
@@ -498,6 +498,8 @@ class InteractiveSpotController:
 
 def main():
     parser = argparse.ArgumentParser(description="Interactive Perception Phase 1")
+    parser.add_argument("--username", required=True, help="Spot username for authentication")
+    parser.add_argument("--password", required=True, help="Spot password for authentication")
     parser.add_argument("--hostname", required=True, help="Spot robot hostname or IP")
     parser.add_argument(
         "--image-source", 
@@ -544,6 +546,8 @@ def main():
     
     # Create controller
     controller = InteractiveSpotController(
+        username=args.username,
+        password=args.password,
         hostname=args.hostname,
         dock_id=args.dock_id,
         image_source=args.image_source,
