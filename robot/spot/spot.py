@@ -10,19 +10,15 @@ Date: June 2025
 import time
 import math
 import numpy as np
-import cv2
 
 from bosdyn.api import(
-    arm_command_pb2,
     geometry_pb2,
-    image_pb2,
     manipulation_api_pb2,
-    robot_command_pb2
 )
 from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME
 from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseKeepAlive
-from bosdyn.client.math_helpers import SE3Pose, Quat
+from bosdyn.client.math_helpers import Quat
 from bosdyn.client.robot_command import (
   RobotCommandBuilder,
   blocking_stand,
@@ -30,7 +26,6 @@ from bosdyn.client.robot_command import (
 )
 from bosdyn.api.spot import robot_command_pb2 as spot_command_pb2
 from bosdyn.api.geometry_pb2 import SE2VelocityLimit, SE2Velocity, Vec2
-from bosdyn.client import math_helpers
 from bosdyn.client.math_helpers import SE2Pose, SE3Pose
 from bosdyn.client.frame_helpers import get_se2_a_tform_b, get_a_tform_b, ODOM_FRAME_NAME, BODY_FRAME_NAME, VISION_FRAME_NAME
 from bosdyn.client.docking import DockingClient, blocking_dock_robot
@@ -39,7 +34,6 @@ from google.protobuf import wrappers_pb2
 
 from .spot_client import SpotClient
 from .spot_camera import SpotCamera
-from .spot_perception import SpotPerception
 
 class Spot:
     """Manages connection, state, and actions for a single robot."""

@@ -28,6 +28,8 @@ from bosdyn.client.math_helpers import SE3Pose
 from spot.spot import Spot, SpotPerception
 from flex.interactive_perception import InteractivePerception
 from flex.policy_manager import PolicyManager
+from spot.spot_helpers import convert_to_cv_image
+from spot_wrapper.wrapper import SpotWrapper
 
 
 def user_confirm_step(step_description):
@@ -128,43 +130,28 @@ def walk_to_door_and_grasp(spot, config):
     
     return target_pixel
 
-def grasp_handle_pixel_location(x_pix, y_pix, config):
+def grasp_handle_pixel_location(spot: SpotWrapper, config, x_pix, y_pix):
     print(f"grasp_handle called with pixel coordinates: {x_pix}, {y_pix}")
 
-    # Initialize robot
-    spot = Spot(id="GraspHandle", username=config.username, password=config.password, hostname=config.hostname)
-    spot.start()
-
     # display target pixel and wait for user approval -- for debugging
-    result = spot.take_picture(color_src=config.image_source, save_images=True)
-    if isinstance(result, tuple):
-        color_img = result[0]
-    else:
-        color_img = result
-
+    color_img = convert_to_cv_image(spot.spot_images.get_hand_rgb_image())
     should_continue = SpotPerception.display_pixel_selection(color_img, x_pix, y_pix, True)
     if not should_continue:
         return False
 
     # get spot lease and execute policy
-    with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
-        try:
-            # Initialize
-            print('Initializing robot...')
-            spot.power_on()
-            spot.stand_up()
+    try:
+        # Walk to door and grasp handle
+        spot.open_gripper()
+        target_pixel = (x_pix, y_pix)
+        success = spot.grasp_edge(target_pixel, img_src=config.image_source)
 
-            # Walk to door and grasp handle
-            spot.open_gripper()
-            target_pixel = (x_pix, y_pix)
-            success = spot.grasp_edge(target_pixel, img_src=config.image_source)
-
-            if success is False:  # User requested quit while holding handle
-                return False
-
-        except Exception as e:
-            print(f'Error occurred: {e}')
+        if success is False:  # User requested quit while holding handle
             return False
+
+    except Exception as e:
+        print(f'Error occurred: {e}')
+        return False
 
     return True
 
