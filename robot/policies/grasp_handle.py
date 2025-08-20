@@ -15,21 +15,20 @@ Date: July 2025
 import argparse
 import sys
 import time
-import numpy as np
-import math
+import logging
+from time import sleep
 
+import yaml
 # Import Spot SDK modules
 from bosdyn.client.lease import LeaseKeepAlive
-from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME
-from bosdyn.client.robot_command import RobotCommandBuilder, block_until_arm_arrives
-from bosdyn.client.math_helpers import SE3Pose
 
 # Import existing Spot modules
-from spot.spot import Spot, SpotPerception
-from flex.interactive_perception import InteractivePerception
-from flex.policy_manager import PolicyManager
-from spot.spot_helpers import convert_to_cv_image
+from spot.spot import Spot
+from spot.spot_helpers import convert_to_cv_image, grasp_object
+from spot.spot_perception import SpotPerception
 from spot_wrapper.wrapper import SpotWrapper
+
+logger = logging.getLogger(__name__)
 
 
 def user_confirm_step(step_description):
@@ -130,7 +129,7 @@ def walk_to_door_and_grasp(spot, config):
     
     return target_pixel
 
-def grasp_handle_pixel_location(spot: SpotWrapper, config, x_pix, y_pix):
+def grasp_handle_pixel_location(spot: SpotWrapper, x_pix, y_pix):
     print(f"grasp_handle called with pixel coordinates: {x_pix}, {y_pix}")
 
     # display target pixel and wait for user approval -- for debugging
@@ -142,11 +141,11 @@ def grasp_handle_pixel_location(spot: SpotWrapper, config, x_pix, y_pix):
     # get spot lease and execute policy
     try:
         # Walk to door and grasp handle
-        spot.open_gripper()
+        spot.spot_arm.gripper_open()
         target_pixel = (x_pix, y_pix)
-        success = spot.grasp_edge(target_pixel, img_src=config.image_source)
-
-        if success is False:  # User requested quit while holding handle
+        success = grasp_object(spot, target_pixel)
+        
+        if success is False:
             return False
 
     except Exception as e:
@@ -188,6 +187,7 @@ def grasp_handle(config):
 
 def main():
     """Command line interface."""
+
     parser = argparse.ArgumentParser(description='Grasp handle with Spot robot')
     parser.add_argument("--username", required=True, help="Spot username for authentication")
     parser.add_argument("--password", required=True, help="Spot password for authentication")

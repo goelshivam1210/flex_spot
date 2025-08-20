@@ -19,7 +19,6 @@ import time
 import numpy as np
 
 # Import Spot SDK modules
-from bosdyn.client.lease import LeaseKeepAlive
 from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, HAND_FRAME_NAME
 from bosdyn.client.robot_command import RobotCommandBuilder, block_until_arm_arrives
 from bosdyn.client.math_helpers import SE3Pose

@@ -18,8 +18,6 @@ Date: July 2025
 import argparse
 import sys
 import time
-import numpy as np
-from sklearn.utils import Bunch
 
 from bosdyn.api import (arm_surface_contact_pb2, arm_surface_contact_service_pb2, 
                         geometry_pb2, trajectory_pb2)
@@ -33,8 +31,8 @@ from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.util import seconds_to_duration
 
 # Import custom Spot modules
-from spot.spot import Spot, SpotPerception
-from spot.spot_camera import SpotCamera
+from spot.spot import Spot
+from spot.spot_perception import SpotPerception
 
 
 def user_confirm_step(step_description):
