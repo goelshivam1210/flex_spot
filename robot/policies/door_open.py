@@ -17,6 +17,7 @@ import argparse
 import sys
 import time
 import numpy as np
+from bosdyn.client import robot_command
 
 # Import Spot SDK modules
 from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, HAND_FRAME_NAME
@@ -158,13 +159,14 @@ def analyze_door_joint(spot: SpotWrapper, config):
             arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
                 target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
             )
-            (success, msg, cmd_id) = spot.robot_command(arm_cmd)
-            # block_until_arm_arrives(spot._robot_command_client, cmd_id, timeout_sec=3.0)
+            (success, msg, cmd_id) = spot.robot_command(arm_cmd, duration=3.0)
+            if not success:
+                raise Exception(f"Failed to send arm command: {msg}")
 
             # Get actual achieved position
             time.sleep(0.5)
             snapshot = spot.robot_state.kinematic_state.transforms_snapshot
-            actual_hand_pose = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
+            actual_hand_pose = get_a_tform_b(snapshot, VISION_FRAME_NAME, HAND_FRAME_NAME)
 
             if actual_hand_pose:
                 actual_position = np.array([actual_hand_pose.x, actual_hand_pose.y, actual_hand_pose.z])
@@ -280,7 +282,8 @@ def execute_policy_opening(spot: SpotWrapper, config, interactive_perception):
                 follow_arm_command = RobotCommandBuilder.follow_arm_command()
                 command = RobotCommandBuilder.build_synchro_command(follow_arm_command, arm_cmd)
                 cmd_id = spot.robot_command(command)
-                spot.wait_for_arm_command_to_complete(cmd_id, timeout_sec=3.0)
+                robot_command.block_until_arm_arrives(spot.spot_arm)
+                spot.spot_arm.wait_for_arm_command_to_complete(cmd_id, timeout_sec=3.0)
             else:
                 deltas = action * config.action_scale
                 d_yaw = np.radians(config.success_angle)/config.max_steps

@@ -22,17 +22,17 @@ import time
 from bosdyn.api import (arm_surface_contact_pb2, arm_surface_contact_service_pb2, 
                         geometry_pb2, trajectory_pb2)
 from bosdyn.client import math_helpers
-from bosdyn.client.arm_surface_contact import ArmSurfaceContactClient
-from bosdyn.client.frame_helpers import (GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME, 
-                                        get_a_tform_b)
+from bosdyn.client.frame_helpers import (GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME,
+                                         get_a_tform_b, HAND_FRAME_NAME, BODY_FRAME_NAME)
 from bosdyn.client.lease import LeaseKeepAlive
-from bosdyn.client.robot_command import RobotCommandBuilder, block_until_arm_arrives
-from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.robot_command import RobotCommandBuilder
 from bosdyn.util import seconds_to_duration
 
 # Import custom Spot modules
 from spot.spot import Spot
+from spot.spot_helpers import convert_to_cv_image
 from spot.spot_perception import SpotPerception
+from spot_wrapper.wrapper import SpotWrapper
 
 
 def user_confirm_step(step_description):
@@ -110,20 +110,15 @@ def walk_to_button_location(spot, config):
     print('Walk to button location completed')
 
 
-def execute_surface_contact_push(spot, config):
+def execute_surface_contact_push(spot: SpotWrapper, config):
     """Use arm surface contact to press down with controlled force."""
     print('Executing arm surface contact sequence')
     
-    # Create the clients we need
-    robot_state_client = spot._client._spot.ensure_client(RobotStateClient.default_service_name)
-    arm_surface_contact_client = spot._client._spot.ensure_client(ArmSurfaceContactClient.default_service_name)
-    
     # Get current robot state and current arm position
-    robot_state = robot_state_client.get_robot_state()
-    snapshot = robot_state.kinematic_state.transforms_snapshot
+    snapshot = spot.robot_state.kinematic_state.transforms_snapshot
     
     # Get current hand pose (where arm is after gazing)
-    current_hand_pose = get_a_tform_b(snapshot, 'body', 'hand')
+    current_hand_pose = get_a_tform_b(snapshot, BODY_FRAME_NAME, HAND_FRAME_NAME)
     if current_hand_pose is None:
         print('Could not get current hand pose')
         return
@@ -143,8 +138,7 @@ def execute_surface_contact_push(spot, config):
     body_Q_hand = geometry_pb2.Quaternion(w=qw, x=qx, y=qy, z=qz)
     
     # Get transform to odom frame
-    odom_T_flat_body = get_a_tform_b(robot_state.kinematic_state.transforms_snapshot,
-                                     ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
+    odom_T_flat_body = get_a_tform_b(snapshot, ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
     
     # STEP 1: Orient gripper downward at current position
     print('Orienting gripper downward at current position...')
@@ -164,9 +158,7 @@ def execute_surface_contact_push(spot, config):
     )
     
     # Execute orientation
-    command_client = spot._client._command_client
-    orient_cmd_id = command_client.robot_command(orient_command)
-    block_until_arm_arrives(command_client, orient_cmd_id, timeout_sec=2.0)
+    (success, msg, orient_cmd_id) = spot.robot_command(orient_command, duration=2.0)
     print('Downward orientation complete')
     
     # STEP 2: Now do the press (from current position down)
@@ -227,12 +219,11 @@ def execute_surface_contact_push(spot, config):
     cmd.bias_force_ewrt_body.CopyFrom(geometry_pb2.Vec3(x=bias_force_x, y=0, z=0))
     
     # Execute the command
-    proto = arm_surface_contact_service_pb2.ArmSurfaceContactCommand(request=cmd)
     print('Executing arm surface contact - pressing down...')
-    arm_surface_contact_client.arm_surface_contact_command(proto)
-    
-    # Wait for completion
-    time.sleep(trajectory_time + 1.0)
+    spot.arm_surface_contact_command(cmd)
+
+    # Wait for completion # TODO: is this necessary?
+    # time.sleep(trajectory_time + 1.0)
     
     # Return to ready position
     print('Moving arm back up to ready position...')
@@ -240,56 +231,37 @@ def execute_surface_contact_push(spot, config):
     
     print('Button press completed')
 
-def push_button_pixel_location(x_pix, y_pix, config):
-    print(f"push_button_pixel_location called with pixel coordinates: {x_pix}, {y_pix}, {config}")
-
-    # Initialize robot using your existing class
-    spot = Spot(id="ButtonPush", username=config.username, password=config.password, hostname=config.hostname)
-    spot.start()
+def push_button_pixel_location(spot: SpotWrapper, x_pix, y_pix, config):
+    print(f"push_button_pixel_location called with pixel coordinates: {x_pix}, {y_pix}")
 
     # display target pixel and wait for user approval -- for debugging
-    result = spot.take_picture(color_src=config.image_source, save_images=True)
-    if isinstance(result, tuple):
-        color_img = result[0]
-    else:
-        color_img = result
-
+    color_img = convert_to_cv_image(spot.spot_images.get_hand_rgb_image())
     should_continue = SpotPerception.display_pixel_selection(color_img, x_pix, y_pix, True)
     if not should_continue:
         return False
 
     # get spot lease and execute policy
-    with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
-        try:
-            # Power on and stand up
-            print('Powering on robot...')
-            spot.power_on()
-            spot.stand_up()
-            spot.open_gripper()
+    try:
+        #  Walk to button location
+        target_pixel = (x_pix, y_pix)
+        spot.walk_to_pixel(target_pixel,
+                           img_src=config.image_source,
+                           offset_distance=config.approach_distance, timeout=config.walk_timeout)
 
-            #  Walk to button location
-            target_pixel = (x_pix, y_pix)
-            spot.walk_to_pixel(target_pixel,
-                               img_src=config.image_source,
-                               offset_distance=config.approach_distance, timeout=config.walk_timeout)
+        # open gripper
+        print(f"opening gripper now")
+        spot.unstow_arm()
 
-            # open gripper
-            print(f"opening gripper now")
-            spot.open_gripper()
-            spot.unstow_arm()
+        # Execute surface contact push
+        execute_surface_contact_push(spot, config)
 
-            spot.close_gripper()
+        print('Button push sequence completed successfully!')
 
-            # Execute surface contact push
-            execute_surface_contact_push(spot, config)
+        spot.stow_arm()
 
-            print('Button push sequence completed successfully!')
-
-            spot.stow_arm()
-
-        except Exception as e:
-            print(f'Error occurred: {e}')
-            return False
+    except Exception as e:
+        print(f'Error occurred: {e}')
+        return False
 
     return True
 
