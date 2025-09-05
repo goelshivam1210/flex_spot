@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import json
 from tensorboard.backend.event_processing import event_accumulator
@@ -9,7 +10,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module='tensorboa
 def export_tensorboard_logs(log_dir):
     """
     Extracts all scalar data from a TensorBoard event file into a JSON format
-    and prints it to standard output.
+    and prints it to standard output. Status messages are printed to standard error.
     """
     event_file = None
     try:
@@ -21,12 +22,14 @@ def export_tensorboard_logs(log_dir):
             if event_file:
                 break
     except Exception as e:
-        print(f"Error walking directory {log_dir}: {e}")
+        print(f"Error walking directory {log_dir}: {e}", file=sys.stderr)
         return
 
     if not event_file:
-        print(f"Error: No TensorBoard event file found in {log_dir}")
+        print(f"Error: No TensorBoard event file found in {log_dir}", file=sys.stderr)
         return
+
+    print(f"Parsing log file: {event_file}...", file=sys.stderr)
 
     try:
         ea = event_accumulator.EventAccumulator(
@@ -46,9 +49,10 @@ def export_tensorboard_logs(log_dir):
             }
             
         print(json.dumps(all_data, indent=2))
+        print(f"Successfully exported data from {log_dir}", file=sys.stderr)
 
     except Exception as e:
-        print(f"An error occurred while processing {event_file}: {e}")
+        print(f"An error occurred while processing {event_file}: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export TensorBoard scalar data to a JSON string.")
