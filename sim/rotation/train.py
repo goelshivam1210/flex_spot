@@ -103,11 +103,15 @@ def main():
 
     # Set random seeds for reproducibility
     seed = args.seed
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.use_deterministic_algorithms(True)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
     if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -115,6 +119,9 @@ def main():
     rng_replay = np.random.default_rng(seed + 10)
     rng_exploration = np.random.default_rng(seed + 20)
     rng_generalization_test = np.random.default_rng(seed + 30)
+
+    dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    torch_rng = torch.Generator(device=dev).manual_seed(seed + 40)
 
     # Create a timestamped run directory for this seed
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -153,6 +160,10 @@ def main():
     test_env_short = SimplePathFollowingEnv(**test_env_short_cfg)
     test_env_short.reset(seed=seed + 2)
 
+    for i, e in enumerate([env, test_env_full, test_env_short]):
+        e.action_space.seed(seed + 100 + i)
+        e.observation_space.seed(seed + 200 + i)
+
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     max_action = env.action_space.high[0]
@@ -162,7 +173,8 @@ def main():
                 state_dim=state_dim,
                 action_dim=action_dim,
                 max_action=max_action,
-                max_torque = env_cfg.get("max_torque", 50.0))
+                max_torque = env_cfg.get("max_torque", 50.0),
+                torch_rng=torch_rng)
     replay_buffer = ReplayBuffer(max_size=agent_cfg.get("replay_buffer_max_size", 5e5), rng=rng_replay)
 
     # Training parameters
