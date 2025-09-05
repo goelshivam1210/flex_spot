@@ -94,7 +94,6 @@ class SimplePathFollowingEnv(gym.Env):
         )
         
         self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
-        self._make_training_segment()
 
         self.prev_position = None
         self.prev_time = None
