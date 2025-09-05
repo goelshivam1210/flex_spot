@@ -76,7 +76,7 @@ class ReplayBuffer:
             del self.buffer[0:int(self.size/5)]
             self.size = len(self.buffer)
         
-        indexes = self.rng.randint(0, len(self.buffer), size=batch_size)
+        indexes = self.rng.integers(0, len(self.buffer), size=batch_size)
         state, action, reward, next_state, done = [], [], [], [], []
         
         for i in indexes:
