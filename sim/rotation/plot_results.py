@@ -76,6 +76,9 @@ def create_plots(parent_dir, output_dir, num_points=200):
         "Training Episode Reward": "Train/EpisodeReward",
         "Training Deviation": "Train/EpisodeDeviation",
         "Spin Penalty": "Train/Reward/SpinPenalty",
+        "Elapsed Seconds": "Time/ElapsedSec",
+        "Throughput (Steps/s, Window=10k)": "Time/StepsPerSecWindow",
+        "Throughput (Steps/s, Cumulative)": "Time/StepsPerSecCumulative",
     }
 
     for plot_title, tag in metrics_to_plot.items():
