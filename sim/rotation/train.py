@@ -145,6 +145,11 @@ def main():
     # Initialize TensorBoard SummaryWriter
     writer = SummaryWriter(logs_dir)
 
+    start_time = time.perf_counter()
+    last_mark_time = start_time
+    milestone = 10_000
+    next_mark = milestone
+
     env = SimplePathFollowingEnv(**env_cfg)
     env.reset(seed=seed)
 
@@ -222,6 +227,23 @@ def main():
             # Step and store
             next_state, reward, done, truncated, info = env.step(action)
             writer.add_scalar("Train/StepReward", reward, total_steps)
+
+            if total_steps >= next_mark:
+                now = time.perf_counter()
+                elapsed_total = now - start_time
+                elapsed_window = now - last_mark_time
+                writer.add_scalar("Time/ElapsedSec", elapsed_total, total_steps)
+                writer.add_scalar("Time/StepsPerSecWindow", milestone / max(elapsed_window, 1e-9), total_steps)
+                writer.add_scalar("Time/StepsPerSecCumulative", total_steps / max(elapsed_total, 1e-9), total_steps)
+                writer.add_scalar("Time/UnixTime", time.time(), total_steps)
+
+                print(f"[Time] {total_steps} steps — {elapsed_total:.1f}s total, "
+                    f"{elapsed_window:.1f}s last {milestone}, "
+                    f"{milestone/elapsed_window:.1f} steps/s window")
+
+                last_mark_time = now
+                next_mark += milestone
+
             episode_over = done or truncated
 
             replay_buffer.add((state, action, reward, next_state, float(done)))
