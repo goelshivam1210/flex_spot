@@ -28,4 +28,6 @@ if __name__ == "__main__":
         save_images=True
     )
 
-    psi_grasp_pt = SpotPerception.find_grasp_sam(color_img, depth_img, left=True)
+    # psi_grasp_pt = SpotPerception.find_grasp_sam(color_img, depth_img, left=True)
+    psi_grasp_pt = SpotPerception.get_red_object_center_of_mass(color_img)
+    

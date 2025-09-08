@@ -28,7 +28,8 @@ class SpotPerception:
     def find_grasp_sam(cv_img, depth_img, left, conf=0.15, min_area_frac=0.03,
                        group_adj=True, gap_frac=0.18, pad_frac=0.1,
                        prefer_largest=True, center_bias=0.4, max_distance_m=3.0):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
         sam_ckpt = "./sam_vit_h_4b8939.pth"  #TODO Needs adjusting
         model_type = "vit_h"
         labels = ["cardboard box", "shipping box", "moving box", 
@@ -374,6 +375,83 @@ class SpotPerception:
 
         print(f"g_image_click {g_image_click}")
         return g_image_click
+
+    @staticmethod
+    def get_red_object_center_of_mass(image, save_visualization=True, output_path="red_object_detection.png"):
+        """
+        Finds the center of mass of red objects in an image and optionally saves a visualization.
+        
+        Args:
+            image (np.ndarray): Input BGR image.
+            save_visualization (bool): Whether to save a visualization image with bounding box and center dot.
+            output_path (str): Path to save the visualization image.
+            
+        Returns:
+            center_of_mass (tuple): (x, y) pixel coordinates of the center of mass,
+                                   or None if no red object is found.
+        """
+        # Convert BGR to HSV for better color detection
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Define range for red color in HSV - tightened for very red objects
+        # Red has two ranges in HSV due to the circular nature of hue
+        lower_red1 = np.array([0, 120, 70])      # More saturated and brighter
+        upper_red1 = np.array([8, 255, 255])     # Narrower hue range
+        lower_red2 = np.array([172, 120, 70])    # More saturated and brighter
+        upper_red2 = np.array([180, 255, 255])   # Narrower hue range
+        
+        # Create masks for both red ranges
+        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+        
+        # Combine both masks
+        red_mask = mask1 + mask2
+        
+        # Apply morphological operations to clean up the mask
+        kernel = np.ones((5, 5), np.uint8)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Find contours of red objects
+        contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None
+        
+        # Find the largest red object
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Calculate the center of mass using moments
+        M = cv2.moments(largest_contour)
+        
+        if M["m00"] == 0:
+            return None
+        
+        # Calculate center of mass
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        
+        # Create visualization if requested
+        if save_visualization:
+            # Create a copy of the original image for visualization
+            vis_image = image.copy()
+            
+            # Draw bounding box around the red object
+            x, y, w, h = cv2.boundingRect(largest_contour)
+            cv2.rectangle(vis_image, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Green bounding box
+            
+            # Draw center of mass as a red dot
+            cv2.circle(vis_image, (cx, cy), 8, (0, 0, 255), -1)  # Red filled circle
+            
+            # Add text label for the center point
+            cv2.putText(vis_image, f"Center: ({cx}, {cy})", (cx + 10, cy - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Save the visualization
+            cv2.imwrite(output_path, vis_image)
+            print(f"Red object detection visualization saved to: {output_path}")
+        
+        return (cx, cy)
 
     @staticmethod
     def cv_mouse_callback(event, x, y, flags, param):
