@@ -13,16 +13,19 @@ robot/
 │   └── spot_camera.py      # Image processing
 ├── flex/                    # Learning layer
 │   ├── alg.py              # TD3 neural networks
+│   ├── path_following_td3.py # Path-following TD3 variant
 │   ├── policy_manager.py   # Policy loading
-│   └── interactive_perception.py  # Joint analysis
+│   └── interactive_perception.py  # Joint analysis & path state construction
 ├── policies/                # Task applications
 │   ├── button_push.py      # Button/switch manipulation
 │   ├── door_open.py        # Door opening (revolute/prismatic)
+│   └── push_drag.py        # Push/drag manipulation with path-following
 
 ├── models/                  # Trained neural network policies
 │   ├── prismatic/
-│   └── revolute/
-└── sim/                     # PyBullet simulation environment
+│   ├── revolute/
+│   └── rotation/            # Path-following policies
+└── sim/                     # PyBullet and Mujoco simulation environment
 ```
 
 ## Quick Start
@@ -55,6 +58,12 @@ python policies/button_push.py --hostname <ROBOT_IP> --press-force-percentage 0.
 
 # Door opening (intelligent joint detection)
 python policies/door_open.py --hostname <ROBOT_IP> --max-steps 20 --action-scale 0.05
+
+# Push/drag manipulation with autonomous detection
+python policies/push_drag.py --hostname <ROBOT_IP> --experiment small_box_no_handle_1robot --autonomous-detection
+
+# Push/drag with manual target selection
+python policies/push_drag.py --hostname <ROBOT_IP> --experiment small_box_handle_1robot --target-distance 1.5
 ```
 
 ## Available Tasks
@@ -63,9 +72,18 @@ python policies/door_open.py --hostname <ROBOT_IP> --max-steps 20 --action-scale
 |------|---------|-------------|
 | **Button Push** | `python policies/button_push.py` | Force-controlled button/switch pressing |
 | **Door Opening** | `python policies/door_open.py` | Door manipulation with joint detection |
-<!-- | **Box Pulling** | `python policies/pull_box.py` | Pull manipulation tasks |
-| **Box Pushing** | `python policies/push_box.py` | Push manipulation tasks |
-| **Multi-Robot** | `python policies/multi_robot_push.py` | Coordinated two-robot manipulation | -->
+| **Push/Drag** | `python policies/push_drag.py` | Box pushing/dragging with path-following policies |
+
+### Push/Drag Task Configurations
+
+The push/drag system supports four experiment types:
+
+| Experiment | Task Type | Description |
+|------------|-----------|-------------|
+| `small_box_no_handle_1robot` | Push | Single robot pushes small box |
+| `large_box_no_handle_2robots` | Push | Coordinated two-robot box pushing |
+| `small_box_handle_1robot` | Drag | Single robot drags box by handle |
+| `large_box_handle_2robots` | Drag | Coordinated two-robot box dragging |
 
 ### Common Parameters
 - `--hostname <IP>`: Spot robot IP address
@@ -73,15 +91,41 @@ python policies/door_open.py --hostname <ROBOT_IP> --max-steps 20 --action-scale
 - `--max-steps <N>`: Maximum policy execution steps
 - `--action-scale <FLOAT>`: Scale factor for policy actions
 
-<!-- ## Key Features
+### Push/Drag Specific Parameters
+- `--experiment <TYPE>`: Experiment configuration (required)
+- `--autonomous-detection`: Use OWL-v2 + SAM for automatic box detection
+- `--robot-side <left|right>`: Robot side for multi-robot coordination
+- `--target-distance <FLOAT>`: Distance to push/drag (default: 1.0m)
+- `--policy-path <PATH>`: Path to trained path-following models
+- `--model-name <NAME>`: Model name to load (default: best_model)
 
-- **Modular Architecture**: Clean separation of hardware, intelligence, and applications
-- **User Safety**: Step-by-step confirmations with emergency quit ('q') at any stage
-- **Intelligent Manipulation**: Automatic joint type detection for doors (revolute/prismatic)
-- **Force Control**: Precise force application for button pressing and manipulation
-- **Multi-Robot Support**: Coordinated manipulation with multiple Spot robots -->
+## Example Commands
 
+### Door Opening
+```bash
+# Prismatic door (sliding)
+python policies/door_open.py --hostname 192.168.1.101 --force-joint-type prismatic --max-steps 40 --action-scale 1.0 --success-distance 0.35
 
+# Revolute door (hinged) - auto-detect joint type
+python policies/door_open.py --hostname 192.168.1.101 --max-steps 10 --action-scale 0.1
+```
+
+### Button Pushing
+```bash
+python policies/push_button.py --hostname 192.168.1.100 --approach-distance 0.9 --press-force-percentage 0.2
+```
+
+### Push/Drag Manipulation
+```bash
+# Single robot push with autonomous detection
+python policies/push_drag.py --hostname 192.168.1.100 --experiment small_box_no_handle_1robot --autonomous-detection --target-distance 1.2
+
+# Multi-robot coordination (left robot)
+python policies/push_drag.py --hostname 192.168.1.100 --experiment large_box_no_handle_2robots --autonomous-detection --robot-side left
+
+# Handle dragging with manual selection
+python policies/push_drag.py --hostname 192.168.1.101 --experiment small_box_handle_1robot --target-distance 0.8
+```
 
 ## Network Setup
 
@@ -97,6 +141,7 @@ Connect to Spot's network and use the robot's IP address. We use HrilabMobile-5G
 
 - Ensure Spot is estopped, authenticated, and on the same network.
 - Trained policies must be accessible in this directory or passed via arguments.
+- For push/drag tasks, ensure path-following models are in `models/rotation/` directory
 
 You need to export the following environment variables to authenticate with the Boston Dynamics API:
 
@@ -109,8 +154,6 @@ The file can be found in the SPOTSDK under `examples/estop_gui.py`.
 ```bash
 python estop_gui.py --ip <ROBOT_IP>
 ```
-
-
 
 ## Development
 
@@ -141,13 +184,3 @@ python estop_gui.py --ip <ROBOT_IP>
 ## License
 
 MIT License
-
-```bash
-python policies/door_open.py --hostname 192.168.1.101 --force-joint-type prismatic --max-steps 40 --action-scale 1.0 --success-distance 0.35
-```
-```bash
-python policies/door_open.py --hostname 192.168.1.101 --max-steps 10 --action-scale 0.1
-```
-```bash
-python policies/push_button.py --hostname 192.168.1.100 --approach-distance 0.9 --press-force-percentage 0.2
-```

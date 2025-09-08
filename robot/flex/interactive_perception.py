@@ -9,6 +9,8 @@ Handles interactive perception tasks for the Spot robot, including:
 Author: Shivam Goel
 Date: July 2025
 """
+import math
+
 import numpy as np
 from sklearn.decomposition import PCA
 from scipy.optimize import least_squares
@@ -163,3 +165,141 @@ class InteractivePerception:
         state = np.concatenate([joint_axis, displacement])
         
         return state.astype(np.float32)
+    
+    def construct_path_following_state(self, current_pos, path_points, current_yaw, closest_idx):
+        """
+        Construct 8D state vector for path-following policy.
+        
+        Args:
+            current_pos: Current gripper/object position [x, y, z]
+            path_points: Array of path waypoints [N x 3]
+            current_yaw: Current robot/object orientation (radians)
+            closest_idx: Index of closest point on path
+            
+        Returns:
+            np.array: 8D state vector [lateral_error, longitudinal_error, orientation_error,
+                                    progress, deviation, speed_along_path, box_forward_x, box_forward_y]
+        """
+        
+        # Find closest point on path
+        closest_point = path_points[closest_idx]
+        
+        # Calculate path tangent direction
+        if closest_idx < len(path_points) - 1:
+            next_point = path_points[closest_idx + 1]
+            path_tangent = next_point - closest_point
+            tangent_norm = np.linalg.norm(path_tangent)
+            if tangent_norm > 1e-8:
+                path_tangent = path_tangent / tangent_norm
+            else:
+                path_tangent = np.array([1.0, 0.0, 0.0])  # Default forward
+        else:
+            # At end of path, use direction from previous point
+            if closest_idx > 0:
+                prev_point = path_points[closest_idx - 1]
+                path_tangent = closest_point - prev_point
+                tangent_norm = np.linalg.norm(path_tangent)
+                if tangent_norm > 1e-8:
+                    path_tangent = path_tangent / tangent_norm
+                else:
+                    path_tangent = np.array([1.0, 0.0, 0.0])
+            else:
+                path_tangent = np.array([1.0, 0.0, 0.0])  # Default forward
+        
+        # Calculate path normal (perpendicular to tangent)
+        path_normal = np.array([-path_tangent[1], path_tangent[0], 0.0])
+        
+        # Calculate position error relative to path
+        position_error = current_pos - closest_point
+        
+        # Project error onto path-relative coordinates
+        lateral_error = np.dot(position_error, path_normal)
+        longitudinal_error = np.dot(position_error, path_tangent)
+        
+        # Calculate orientation error
+        desired_yaw = math.atan2(path_tangent[1], path_tangent[0])
+        orientation_error = math.atan2(
+            math.sin(current_yaw - desired_yaw), 
+            math.cos(current_yaw - desired_yaw)
+        )
+        
+        # Discretize orientation error (matching simulation)
+        angle_bin_size = 10.0  # degrees
+        num_bins = int(360 / angle_bin_size)
+        bin_index = int(((orientation_error + math.pi) * 180/math.pi) / angle_bin_size) % num_bins
+        discretized_orientation_error = (bin_index * angle_bin_size * math.pi/180) - math.pi
+        
+        # Calculate progress along path (0 to 1)
+        if len(path_points) > 1:
+            progress = closest_idx / (len(path_points) - 1)
+        else:
+            progress = 0.0
+        
+        # Calculate deviation from path
+        deviation = np.linalg.norm(position_error)
+        
+        # Calculate speed along path (simplified - could use position history)
+        speed_along_path = 0.0  # For now, set to 0 (could be enhanced with velocity tracking)
+        
+        # Robot/box orientation unit vectors
+        box_forward_x = math.cos(current_yaw)
+        box_forward_y = math.sin(current_yaw)
+        
+        # Construct 8D state vector (matching simulation environment)
+        state = np.array([
+            lateral_error,
+            longitudinal_error,
+            discretized_orientation_error,
+            progress,
+            deviation,
+            speed_along_path,
+            box_forward_x,
+            box_forward_y
+        ], dtype=np.float32)
+        
+        return state
+
+    def update_closest_path_index(self, current_pos, path_points, last_idx):
+        """
+        Update the closest path point index efficiently.
+        
+        Args:
+            current_pos: Current position [x, y, z]
+            path_points: Array of path waypoints [N x 3]
+            last_idx: Last known closest index
+            
+        Returns:
+            int: Updated closest path index
+        """
+        # Search in a window around the last known closest point
+        search_start = max(0, last_idx - 5)
+        search_end = min(len(path_points), last_idx + 20)
+        
+        if search_start >= search_end:
+            return last_idx
+        
+        search_points = path_points[search_start:search_end]
+        distances = np.linalg.norm(search_points - current_pos, axis=1)
+        
+        closest_in_window = np.argmin(distances)
+        return search_start + closest_in_window
+
+    def generate_straight_line_path(self, start_pos, end_pos, num_points=50):
+        """
+        Generate a straight line path between two points.
+        
+        Args:
+            start_pos: Starting position [x, y, z]
+            end_pos: Ending position [x, y, z]
+            num_points: Number of waypoints along the path
+            
+        Returns:
+            np.array: Path points [num_points x 3]
+        """
+        path_points = []
+        for i in range(num_points):
+            t = i / max(1, num_points - 1)  # Avoid division by zero
+            point = start_pos + t * (end_pos - start_pos)
+            path_points.append(point)
+        
+        return np.array(path_points) 

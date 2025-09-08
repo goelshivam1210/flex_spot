@@ -2,6 +2,8 @@ import os
 import numpy as np
 
 from flex.alg import TD3
+from flex.path_following_td3 import TD3
+
 
 class PolicyManager:
     """
@@ -47,6 +49,39 @@ class PolicyManager:
         self.current_policy = policy
         self.current_joint_type = joint_type
         print(f"→ Loaded {joint_type} policy")
+        
+        return policy
+    
+    def load_path_following_policy(self, policy_path="models/rotation", model_name="best_model"):
+        """
+        Load TD3 policy for path-following tasks (push/drag operations).
+        
+        Args:
+            policy_path: Directory containing path-following policy models
+            model_name: Name of the model to load (e.g., "best_model", "final_model")
+            
+        Returns:
+            TD3 policy object for path-following
+        """
+                
+        # Path-following policy parameters
+        state_dim = 8        # [lateral_error, longitudinal_error, orientation_error, 
+                            #  progress, deviation, speed_along_path, box_forward_x, box_forward_y]
+        action_dim = 3       # [force_x, force_y, torque_z]
+        max_action = 1.0     # Normalized output range
+        max_torque = 50.0    # From simulation configuration
+        
+        # Check if model exists
+        if not os.path.exists(f"{policy_path}/{model_name}_actor.pth"):
+            raise FileNotFoundError(f"Path-following policy not found: {policy_path}/{model_name}_actor.pth")
+        
+        # Create and load policy
+        policy = TD3(0.0001, state_dim, action_dim, max_action, max_torque)
+        policy.load_actor(policy_path, model_name)
+        
+        self.current_policy = policy
+        self.current_joint_type = "path_following"
+        print(f"→ Loaded path-following policy from {policy_path}/{model_name}")
         
         return policy
     
