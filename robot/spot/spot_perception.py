@@ -11,6 +11,7 @@ import numpy as np
 import math
 import cv2
 import torch
+from typing import List, Tuple
 
 from segment_anything import sam_model_registry, SamPredictor
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
@@ -73,7 +74,7 @@ class SpotPerception:
             rect_score, box = rectangularity_and_box(m)
             if box is None: continue
 
-            area = float(m.sum()) / float(H*W)
+            area = float(m.sum()) / float(h*w)
             # center prior
             cx, cy = box.mean(axis=0)
             dist = np.linalg.norm(np.array([cx,cy]) - img_center) / math.sqrt(w*w + h*h)
@@ -126,11 +127,11 @@ class SpotPerception:
         else:
             mid_pt = [(box_ord[1][0]+box_ord[2][0])/2, (box_ord[1][1]+box_ord[2][1])/2]
 
-        depth, px, py = SpotPerception.get_depth_at_pixel(depth_img, mid_pt[0], mid_pt[1], search_radius=20)
-        if depth is not None and depth < max_distance_m:
-            return px, py
+        # depth, px, py = SpotPerception.get_depth_at_pixel(depth_img, mid_pt[0], mid_pt[1], search_radius=20)
+        # if depth is not None and depth < max_distance_m:
+        #     return px, py
         
-        return None
+        return mid_pt
 
     @staticmethod
     def find_strongest_vertical_edge(cv_img, depth_img):

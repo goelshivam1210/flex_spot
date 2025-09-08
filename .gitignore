@@ -85,5 +85,6 @@ results_2/
 /spot-sdk
 *.png
 *.jpg
+*.jpeg
 
 robot/images
