@@ -2,14 +2,14 @@ env:
   gui: false
   max_force: 400.0
   max_torque: 50.0
-  friction: 0.5
-  spinning_friction: 0.05
+  friction: 0.8
+  spinning_friction: 0.6
   rolling_friction: 0.01
   linear_damping: 0.05
   angular_damping: 0.1
   goal_pos: [2.0, 0.0]
   goal_thresh: 0.2
-  segment_length: 0.3
+  short_segment_length: 0.3
   strict_terminal: true
   spin_penalty_k: 0.1
   deviation_tolerance: 0.15
@@ -32,3 +32,4 @@ training:
   start_timesteps: 2000
   save_freq: 500
   save_dir: "models/"
+  train_segment_mode: "short"

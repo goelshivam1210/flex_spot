@@ -11,6 +11,7 @@ import gymnasium as gym
 
 from env import SimplePathFollowingEnv
 from td3 import TD3, ReplayBuffer
+from test_dual_force import DualForceTestEnv
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -80,6 +81,31 @@ def test_policy(env, agent, num_episodes=20, render=False):
         "avg_reward": total_reward / num_episodes,
         "success_rate": successes / num_episodes
     }
+
+def test_policy_dual_force(env, agent, num_episodes=20, render=False):
+    total_reward = 0.0
+    successes = 0
+    env.set_force_mode("contact")
+    for ep in range(num_episodes):
+        state, _ = env.reset()
+        ep_reward = 0.0
+        while True:
+            action = agent.select_action(np.array(state)).squeeze(0)
+            next_state, reward, done, truncated, info = env.step(action)
+            state = next_state
+            ep_reward += reward
+            if render:
+                env.render()
+            if done or truncated:
+                if done and info["progress"] > 0.95 and info["deviation"] < env.goal_thresh:
+                    successes += 1
+                break
+        total_reward += ep_reward
+    return {
+        "avg_reward": total_reward / num_episodes,
+        "success_rate": successes / num_episodes
+    }
+
 
 def main():
     # Parse command line arguments
@@ -151,21 +177,38 @@ def main():
     next_mark = milestone
 
     env = SimplePathFollowingEnv(**env_cfg)
+
+    train_mode = training_cfg.get("train_segment_mode", "short").lower()
+    if train_mode == "short":
+        env.segment_length = env_cfg.get("short_segment_length", 0.3)
+    elif train_mode == "full":
+        env.segment_length = None
+    else:
+        raise ValueError(f"Unknown train_segment_mode: {train_mode}")
+
     env.reset(seed=seed)
 
     test_env_full_cfg = env_cfg.copy()
     test_env_full_cfg['gui'] = args.render_test
     test_env_full_cfg['max_steps'] = 1000
+    test_env_full_cfg['segment_length'] = None
     test_env_full = SimplePathFollowingEnv(**test_env_full_cfg)
     test_env_full.reset(seed=seed + 1)
 
     test_env_short_cfg = env_cfg.copy()
     test_env_short_cfg['gui'] = args.render_test
-    test_env_short_cfg['segment_length'] = None
+    test_env_short_cfg['segment_length'] = env_cfg.get('short_segment_length', 0.3)
     test_env_short = SimplePathFollowingEnv(**test_env_short_cfg)
     test_env_short.reset(seed=seed + 2)
 
-    for i, e in enumerate([env, test_env_full, test_env_short]):
+    test_env_dual_cfg = env_cfg.copy()
+    test_env_dual_cfg['gui'] = args.render_test
+    test_env_dual_cfg['max_steps'] = 1000
+    test_env_dual_cfg['segment_length'] = None
+    test_env_dual_full = DualForceTestEnv(**test_env_dual_cfg)
+    test_env_dual_full.reset(seed=seed + 3)
+
+    for i, e in enumerate([env, test_env_full, test_env_short, test_env_dual_full]):
         e.action_space.seed(seed + 100 + i)
         e.observation_space.seed(seed + 200 + i)
 
@@ -226,7 +269,7 @@ def main():
 
             # Step and store
             next_state, reward, done, truncated, info = env.step(action)
-            writer.add_scalar("Train/StepReward", reward, total_steps)
+            # writer.add_scalar("Train/StepReward", reward, total_steps)
 
             if total_steps >= next_mark:
                 now = time.perf_counter()
@@ -257,37 +300,37 @@ def main():
             deviation =  state[4]
             speed_along_path =  state[5]
 
-            writer.add_scalar("Train/LateralError", lateral_err, total_steps)
-            writer.add_scalar("Train/LongitudinalError", longitudinal_err, total_steps)
-            writer.add_scalar("Train/OrientationError", orientation_err, total_steps)
-            writer.add_scalar("Train/Progress", progress, total_steps)
-            writer.add_scalar("Train/Deviation", deviation, total_steps)
-            writer.add_scalar("Train/SpeedAlongPath", speed_along_path, total_steps)
+            # writer.add_scalar("Train/LateralError", lateral_err, total_steps)
+            # writer.add_scalar("Train/LongitudinalError", longitudinal_err, total_steps)
+            # writer.add_scalar("Train/OrientationError", orientation_err, total_steps)
+            # writer.add_scalar("Train/Progress", progress, total_steps)
+            # writer.add_scalar("Train/Deviation", deviation, total_steps)
+            # writer.add_scalar("Train/SpeedAlongPath", speed_along_path, total_steps)
 
             # action magnitudes
             force_mag = np.linalg.norm(action[:2]) * env.max_force
             torque_v = action[2] * env.max_torque
-            writer.add_scalar("Action/ForceMagnitude", force_mag, total_steps)
-            writer.add_scalar("Action/Torque", torque_v, total_steps)
+            # writer.add_scalar("Action/ForceMagnitude", force_mag, total_steps)
+            # writer.add_scalar("Action/Torque", torque_v, total_steps)
 
-            for name, val in info["reward_comps"].items():
-                writer.add_scalar(f"Train/Reward/{name}", val, total_steps)
+            # for name, val in info["reward_comps"].items():
+            #     writer.add_scalar(f"Train/Reward/{name}", val, total_steps)
 
-            writer.add_scalar(
-                "Train/TerminalAdjustment",
-                info["terminal_adjustment"],
-                total_steps
-            )
-            writer.add_scalar(
-                "Train/GoalSuccess",
-                1 if info["terminal_event"] == "success" else 0,
-                total_steps
-            )
-            writer.add_scalar(
-                "Train/OrientFail",
-                1 if info["terminal_event"] == "orient_fail" else 0,
-                total_steps
-            )
+            # writer.add_scalar(
+            #     "Train/TerminalAdjustment",
+            #     info["terminal_adjustment"],
+            #     total_steps
+            # )
+            # writer.add_scalar(
+            #     "Train/GoalSuccess",
+            #     1 if info["terminal_event"] == "success" else 0,
+            #     total_steps
+            # )
+            # writer.add_scalar(
+            #     "Train/OrientFail",
+            #     1 if info["terminal_event"] == "orient_fail" else 0,
+            #     total_steps
+            # )
 
             # TD3 update
             if replay_buffer.size > batch_size:
@@ -308,10 +351,10 @@ def main():
         # Log training reward
         print(f"[Ep {ep:4d}] Train Reward: {ep_reward:.2f}")
 
-        writer.add_scalar("Train/EpisodeReward", ep_reward, ep)
-        writer.add_scalar("Train/EpisodeDeviation", deviation, ep)
-        writer.add_scalar("Train/EpisodeOrientation", orientation_err, ep)
-        writer.add_scalar("Train/Steps", ep_steps, ep)
+        # writer.add_scalar("Train/EpisodeReward", ep_reward, ep)
+        # writer.add_scalar("Train/EpisodeDeviation", deviation, ep)
+        # writer.add_scalar("Train/EpisodeOrientation", orientation_err, ep)
+        # writer.add_scalar("Train/Steps", ep_steps, ep)
 
         # Periodic evaluation on both short segment & full arc
         if ep % args.test_freq == 0:
@@ -321,13 +364,22 @@ def main():
             full_stats  = test_policy(test_env_full, agent,
                                     num_episodes=args.test_episodes,
                                     render=args.render_test)
+            
+            dual_stats  = test_policy_dual_force(test_env_dual_full, agent,
+                                        num_episodes=args.test_episodes,
+                                        render=args.render_test)
+
 
             print(f"  >> Short-seg Success: {short_stats['success_rate']:.2f}, "
-                f"Full-arc Success: {full_stats['success_rate']:.2f}")
+                f"Full-arc Success: {full_stats['success_rate']:.2f}, "
+                f"Dual-arc Success: {dual_stats['success_rate']:.2f}")
+
             writer.add_scalar("Eval/ShortSuccess", short_stats["success_rate"], total_steps)
             writer.add_scalar("Eval/FullSuccess",  full_stats["success_rate"],  total_steps)
             writer.add_scalar("Eval/ShortReward",  short_stats["avg_reward"],   total_steps)
             writer.add_scalar("Eval/FullReward",   full_stats["avg_reward"],    total_steps)
+            writer.add_scalar("Eval/DualSuccess",  dual_stats["success_rate"],  total_steps)
+            writer.add_scalar("Eval/DualReward",   dual_stats["avg_reward"],    total_steps)
 
             # Save best model on full-arc success
             if full_stats["success_rate"] > best_full_success:
@@ -346,8 +398,14 @@ def main():
     final_full  = test_policy(test_env_full,  agent,
                             num_episodes=args.test_episodes * 2,
                             render=args.render_test)
+    final_dual = test_policy_dual_force(test_env_dual_full, agent,
+                                    num_episodes=args.test_episodes * 2,
+                                    render=args.render_test)
+
     print(f"\nFINAL SHORT-SEG: Reward={final_short['avg_reward']:.2f}, Success={final_short['success_rate']:.2f}")
     print(f"FINAL FULL-ARC:  Reward={final_full['avg_reward']:.2f}, Success={final_full['success_rate']:.2f}")
+    print(f"FINAL DUAL-FORCE (Full Arc): Reward={final_dual['avg_reward']:.2f}, Success={final_dual['success_rate']:.2f}")
+
 
     # Save final model
     agent.save(models_dir, "final_model")
@@ -360,6 +418,7 @@ def main():
     env.close()
     test_env_short.close()
     test_env_full.close()
+    test_env_dual_full.close()
     writer.close()
 
 if __name__ == "__main__":

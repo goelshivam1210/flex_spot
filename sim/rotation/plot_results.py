@@ -5,6 +5,26 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+def best_run_for_tag(run_dirs, all_run_data, tag):
+    """
+    Returns (run_dir, run_name, max_val, step_at_max) for the run that has the highest value for `tag`.
+    Looks across the full training trace in each run's data.json.
+    """
+    best = (None, None, -np.inf, None)
+    for run_dir, run_data in zip(run_dirs, all_run_data):
+        if tag not in run_data or run_data[tag].empty:
+            continue
+        df = run_data[tag].drop_duplicates(subset='steps', keep='last')
+        idx = df['values'].idxmax()
+        if pd.isna(idx):
+            continue
+        max_val = df.loc[idx, 'values']
+        step_at_max = int(df.loc[idx, 'steps'])
+        if max_val > best[2]:
+            best = (run_dir, os.path.basename(run_dir), float(max_val), step_at_max)
+    return best
+
+
 def load_run_data(run_dir):
     """Loads data.json file from single run directory"""
     json_path = os.path.join(run_dir, "data.json")
@@ -73,9 +93,8 @@ def create_plots(parent_dir, output_dir, num_points=200):
         "Average Reward (Full Arc)": "Eval/FullReward",
         "Success Rate (Short Arc)": "Eval/ShortSuccess",
         "Average Reward (Short Arc)": "Eval/ShortReward",
-        "Training Episode Reward": "Train/EpisodeReward",
-        "Training Deviation": "Train/EpisodeDeviation",
-        "Spin Penalty": "Train/Reward/SpinPenalty",
+        "Success Rate (Dual Force Full Arc)": "Eval/DualSuccess",
+        "Average Reward (Dual Force Full Arc)": "Eval/DualReward",
         "Elapsed Seconds": "Time/ElapsedSec",
         "Throughput (Steps/s, Window=10k)": "Time/StepsPerSecWindow",
         "Throughput (Steps/s, Cumulative)": "Time/StepsPerSecCumulative",
@@ -104,6 +123,20 @@ def create_plots(parent_dir, output_dir, num_points=200):
         plt.savefig(output_path)
         plt.close()
         print(f"--> Saved plot to {output_path}")
+    
+    tags_of_interest = {
+        "Short": "Eval/ShortSuccess",
+        "Full":  "Eval/FullSuccess",
+        "Dual":  "Eval/DualSuccess",
+    }
+
+    print("\n=== Best policies (max success over training) ===")
+    for name, tag in tags_of_interest.items():
+        run_dir, run_name, max_val, step_at_max = best_run_for_tag(run_dirs, all_run_data, tag)
+        if run_dir is None:
+            print(f"{name}: no data found for tag '{tag}'")
+            continue
+        print(f"{name}: {run_name}  |  max={max_val:.3f} at step {step_at_max}  |  models: {os.path.join(run_dir, 'models')}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot aggregated results from multiple TensorBoard JSON exports.")
