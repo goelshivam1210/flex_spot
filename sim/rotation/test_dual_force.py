@@ -245,7 +245,7 @@ class DualForceTestEnv(SimplePathFollowingEnv):
         # Continue with rest of step method (same as parent)
         state_after = self._get_state()
         angular_velocity_z = self.data.qvel[5]
-        reward = self._calculate_reward(state_before, state_after, angular_velocity_z)
+        reward, reward_comps = self._calculate_reward(state_before, state_after, angular_velocity_z)
         
         progress = state_after[3]
         deviation = state_after[4]
@@ -277,8 +277,8 @@ class DualForceTestEnv(SimplePathFollowingEnv):
             "force_mode": self.force_mode,
             "current_segment": self.current_segment,
             "applied_wrench": wrench,
-            "applied_forces": getattr(self, 'applied_contact_forces', None)
-
+            "applied_forces": getattr(self, 'applied_contact_forces', None),
+            "reward_comps": reward_comps,
         }
         
         if self.steps % 20 == 0:
