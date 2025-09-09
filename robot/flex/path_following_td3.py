@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
+import os
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -196,4 +197,12 @@ class TD3:
         
     def load_actor(self, directory, name):
         self.actor.load_state_dict(torch.load('%s/%s_actor.pth' % (directory, name), map_location=lambda storage, loc: storage))
-        self.actor_target.load_state_dict(torch.load('%s/%s_actor_target.pth' % (directory, name), map_location=lambda storage, loc: storage))
+        
+        # Try to load actor_target, if it doesn't exist, copy actor weights to target
+        actor_target_path = '%s/%s_actor_target.pth' % (directory, name)
+        if os.path.exists(actor_target_path):
+            self.actor_target.load_state_dict(torch.load(actor_target_path, map_location=lambda storage, loc: storage))
+        else:
+            # Copy actor weights to actor_target if target file doesn't exist
+            print(f"Warning: {actor_target_path} not found. Copying actor weights to target.")
+            self.actor_target.load_state_dict(self.actor.state_dict())
