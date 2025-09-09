@@ -92,6 +92,8 @@ def test_policy_dual_force(env, agent, num_episodes=20, render=False):
         while True:
             action = agent.select_action(np.array(state)).squeeze(0)
             next_state, reward, done, truncated, info = env.step(action)
+            if isinstance(reward, tuple):
+                reward = float(reward[0])
             state = next_state
             ep_reward += reward
             if render:
