@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import time
 import datetime
@@ -85,17 +87,25 @@ def test_policy(env, agent, num_episodes=20, render=False):
 def test_policy_dual_force(env, agent, num_episodes=20, render=False):
     total_reward = 0.0
     successes = 0
-    env.set_force_mode("contact")
+    with contextlib.redirect_stdout(io.StringIO()):
+        env.set_force_mode("contact")
+
     for ep in range(num_episodes):
-        state, _ = env.reset()
+        with contextlib.redirect_stdout(io.StringIO()):
+            state, _ = env.reset()
+
         ep_reward = 0.0
         while True:
             action = agent.select_action(np.array(state)).squeeze(0)
-            next_state, reward, done, truncated, info = env.step(action)
-            if isinstance(reward, tuple):
-                reward = float(reward[0])
+            with contextlib.redirect_stdout(io.StringIO()):
+                next_state, reward, done, truncated, info = env.step(action)
+
+            if isinstance(reward, (tuple, list, np.ndarray)):
+                reward = float(np.asarray(reward).flat[0])
+
             state = next_state
-            ep_reward += reward
+            ep_reward += float(reward)
+
             if render:
                 env.render()
             if done or truncated:
@@ -251,7 +261,8 @@ def main():
                     break
 
         # Reset training environment (draws a new short segment automatically)
-        state, _ = env.reset()
+        with contextlib.redirect_stdout(io.StringIO()):
+            state, _ = env.reset()
         ep_reward = 0.0
         done = False
         ep_steps = 0
@@ -270,7 +281,8 @@ def main():
                 action = np.clip(action + noise, env.action_space.low, env.action_space.high)
 
             # Step and store
-            next_state, reward, done, truncated, info = env.step(action)
+            with contextlib.redirect_stdout(io.StringIO()):
+                next_state, reward, done, truncated, info = env.step(action)
             # writer.add_scalar("Train/StepReward", reward, total_steps)
 
             if total_steps >= next_mark:
