@@ -503,6 +503,17 @@ class Spot:
         print(f"{self.id}: Current pose: x={x:.2f}, y={y:.2f}, yaw={yaw:.2f} rad")
         return x, y, yaw
 
+    def check_grip(self):
+        """
+        Check if the robot is currently holding something.
+        Returns:
+            bool: True if holding something, False otherwise
+        """
+        robot_state = self._client._state_client.get_robot_state()
+        is_holding = robot_state.manipulator_state.is_gripper_holding_item
+        print(f"{self.id}: Gripper holding something? {is_holding}")
+        return is_holding
+
     def return_to_saved_yaw(self, saved_yaw: float, tolerance=0.02, max_time=5):
         """Rotate Spot in place to the saved yaw (in the vision frame)."""
         def wrap_to_pi(angle):
