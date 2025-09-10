@@ -2,8 +2,8 @@ env:
   gui: false
   max_force: 400.0
   max_torque: 50.0
-  friction: 0.8
-  spinning_friction: 0.6
+  friction: 0.5
+  spinning_friction: 0.05
   rolling_friction: 0.01
   linear_damping: 0.05
   angular_damping: 0.1
@@ -33,3 +33,8 @@ training:
   save_freq: 500
   save_dir: "models/"
   train_segment_mode: "short"
+
+  eval_early_stop:
+    enabled: true
+    threshold: 0.95
+    patience: 1

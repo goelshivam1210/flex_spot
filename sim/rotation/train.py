@@ -137,6 +137,11 @@ def main():
     env_cfg = config["env"]
     agent_cfg = config["agent"]
     training_cfg = config["training"]
+    early_stop_cfg = training_cfg.get("eval_early_stop", {})
+    es_enabled   = early_stop_cfg.get("enabled", False)
+    es_threshold = float(early_stop_cfg.get("threshold", 0.95))
+    es_patience  = int(early_stop_cfg.get("patience", 1))
+    meets_streak = 0
     curriculum_cfg = training_cfg.get("curriculum", None)
 
     # Set random seeds for reproducibility
@@ -400,6 +405,21 @@ def main():
                 best_full_success = full_stats["success_rate"]
                 agent.save(models_dir, "best_model")
                 print(f" New best full-arc success: {best_full_success:.2f} — model saved")
+            
+            if es_enabled:
+                meets = (
+                    short_stats["success_rate"] >= es_threshold and
+                    full_stats["success_rate"]  >= es_threshold and
+                    dual_stats["success_rate"]  >= es_threshold
+                )
+                meets_streak = meets_streak + 1 if meets else 0
+                writer.add_scalar("Eval/AllThreeMeet", 1 if meets else 0, total_steps)
+
+                if meets_streak >= es_patience:
+                    agent.save(models_dir, "converged_model")
+                    print(f" Early-stop: all evals >= {es_threshold:.2f} for "
+                        f"{es_patience} eval(s). Stopping training.")
+                    break
 
         # Periodic checkpointing
         if ep % training_cfg.get("save_freq", 2000) == 0:
