@@ -53,14 +53,17 @@ def test_policy(env, agent, num_episodes=20, render=False):
     Returns:
         dict: Statistics about the test run (avg_reward, success_rate)
     """
-    total_reward = 0
+    total_reward = 0.0
     successes = 0
+    total_steps_mdp = 0
+    total_dev_sum = 0.0
     
     for ep in range(num_episodes):
         state, _ = env.reset()
         ep_reward = 0
         done = False
         ep_steps = 0
+        ep_dev_sum = 0.0
         
         while True:
             action = agent.select_action(np.array(state)).squeeze(0)            
@@ -68,6 +71,7 @@ def test_policy(env, agent, num_episodes=20, render=False):
             state = next_state
             ep_reward += reward
             ep_steps += 1
+            ep_dev_sum += float(info["deviation"])
             
             if render:
                 env.render()
@@ -78,15 +82,22 @@ def test_policy(env, agent, num_episodes=20, render=False):
                 break
         
         total_reward += ep_reward
+        total_steps_mdp += ep_steps
+        total_dev_sum += ep_dev_sum
     
     return {
         "avg_reward": total_reward / num_episodes,
-        "success_rate": successes / num_episodes
+        "success_rate": successes / num_episodes,
+        "avg_steps": total_steps_mdp / num_episodes,
+        "avg_deviation_sum": total_dev_sum / num_episodes,
     }
 
 def test_policy_dual_force(env, agent, num_episodes=20, render=False):
     total_reward = 0.0
     successes = 0
+    total_steps_mdp = 0
+    total_dev_sum = 0.0
+
     with contextlib.redirect_stdout(io.StringIO()):
         env.set_force_mode("contact")
 
@@ -95,6 +106,9 @@ def test_policy_dual_force(env, agent, num_episodes=20, render=False):
             state, _ = env.reset()
 
         ep_reward = 0.0
+        ep_steps = 0
+        ep_dev_sum = 0.0
+
         while True:
             action = agent.select_action(np.array(state)).squeeze(0)
             with contextlib.redirect_stdout(io.StringIO()):
@@ -105,6 +119,8 @@ def test_policy_dual_force(env, agent, num_episodes=20, render=False):
 
             state = next_state
             ep_reward += float(reward)
+            ep_steps += 1
+            ep_dev_sum += float(info["deviation"])
 
             if render:
                 env.render()
@@ -113,9 +129,14 @@ def test_policy_dual_force(env, agent, num_episodes=20, render=False):
                     successes += 1
                 break
         total_reward += ep_reward
+        total_steps_mdp += ep_steps
+        total_dev_sum += ep_dev_sum
+
     return {
         "avg_reward": total_reward / num_episodes,
-        "success_rate": successes / num_episodes
+        "success_rate": successes / num_episodes,
+        "avg_steps": total_steps_mdp / num_episodes,
+        "avg_deviation_sum": total_dev_sum / num_episodes,
     }
 
 
@@ -137,11 +158,15 @@ def main():
     env_cfg = config["env"]
     agent_cfg = config["agent"]
     training_cfg = config["training"]
-    early_stop_cfg = training_cfg.get("eval_early_stop", {})
-    es_enabled   = early_stop_cfg.get("enabled", False)
-    es_threshold = float(early_stop_cfg.get("threshold", 0.95))
-    es_patience  = int(early_stop_cfg.get("patience", 1))
-    meets_streak = 0
+
+    eval_stage1_threshold = float(training_cfg.get("stage1_threshold", 0.85))
+    eval_stage1_patience  = int(training_cfg.get("stage1_patience", 20))
+    eval_stage1_interval  = int(training_cfg.get("stage1_interval", args.test_freq))
+
+    eval_stage2_threshold = float(training_cfg.get("stage2_threshold", 0.95))
+    eval_stage2_patience  = int(training_cfg.get("stage2_patience", 20))
+    eval_stage2_interval  = int(training_cfg.get("stage2_interval", 5))
+
     curriculum_cfg = training_cfg.get("curriculum", None)
 
     # Set random seeds for reproducibility
@@ -257,6 +282,11 @@ def main():
     # --- Training Loop ---
     total_steps = 0
     best_full_success = 0.0
+    eval_phase = 1
+    eval_interval = eval_stage1_interval
+    next_eval_ep = 0
+    stage1_streak = 0
+    stage2_streak = 0
 
     for ep in range(episodes):
         if curriculum_cfg is not None:
@@ -376,7 +406,7 @@ def main():
         # writer.add_scalar("Train/Steps", ep_steps, ep)
 
         # Periodic evaluation on both short segment & full arc
-        if ep % args.test_freq == 0:
+        if ep >= next_eval_ep:
             short_stats = test_policy(test_env_short, agent,
                                     num_episodes=args.test_episodes,
                                     render=args.render_test)
@@ -395,10 +425,19 @@ def main():
 
             writer.add_scalar("Eval/ShortSuccess", short_stats["success_rate"], total_steps)
             writer.add_scalar("Eval/FullSuccess",  full_stats["success_rate"],  total_steps)
+            writer.add_scalar("Eval/DualSuccess",  dual_stats["success_rate"],  total_steps)
+
             writer.add_scalar("Eval/ShortReward",  short_stats["avg_reward"],   total_steps)
             writer.add_scalar("Eval/FullReward",   full_stats["avg_reward"],    total_steps)
-            writer.add_scalar("Eval/DualSuccess",  dual_stats["success_rate"],  total_steps)
             writer.add_scalar("Eval/DualReward",   dual_stats["avg_reward"],    total_steps)
+
+            writer.add_scalar("Eval/ShortAvgSteps", short_stats["avg_steps"], total_steps)
+            writer.add_scalar("Eval/FullAvgSteps",  full_stats["avg_steps"],  total_steps)
+            writer.add_scalar("Eval/DualAvgSteps",  dual_stats["avg_steps"],  total_steps)
+
+            writer.add_scalar("Eval/ShortDevSum",   short_stats["avg_deviation_sum"], total_steps)
+            writer.add_scalar("Eval/FullDevSum",    full_stats["avg_deviation_sum"],  total_steps)
+            writer.add_scalar("Eval/DualDevSum",    dual_stats["avg_deviation_sum"],  total_steps)
 
             # Save best model on full-arc success
             if full_stats["success_rate"] > best_full_success:
@@ -406,20 +445,37 @@ def main():
                 agent.save(models_dir, "best_model")
                 print(f" New best full-arc success: {best_full_success:.2f} — model saved")
             
-            if es_enabled:
-                meets = (
-                    short_stats["success_rate"] >= es_threshold and
-                    full_stats["success_rate"]  >= es_threshold and
-                    dual_stats["success_rate"]  >= es_threshold
-                )
-                meets_streak = meets_streak + 1 if meets else 0
-                writer.add_scalar("Eval/AllThreeMeet", 1 if meets else 0, total_steps)
+            if eval_phase == 1:
+                meets = (short_stats["success_rate"] >= eval_stage1_threshold and
+                        full_stats["success_rate"]  >= eval_stage1_threshold and
+                        dual_stats["success_rate"]  >= eval_stage1_threshold)
+                stage1_streak = stage1_streak + 1 if meets else 0
 
-                if meets_streak >= es_patience:
+                print(f" [Stage1] streak={stage1_streak}/{eval_stage1_patience} (threshold={eval_stage1_threshold:.2f})")
+                if stage1_streak >= eval_stage1_patience:
+                    eval_phase = 2
+                    eval_interval = eval_stage2_interval
+                    stage1_streak = 0
+                    next_eval_ep = ep + eval_interval  # tighten cadence
+                    print(f" >>> Switched to Stage 2 eval: every {eval_interval} episodes; "
+                        f"threshold={eval_stage2_threshold:.2f}; patience={eval_stage2_patience}")
+                else:
+                    next_eval_ep = ep + eval_interval
+
+            elif eval_phase == 2:
+                meets = (short_stats["success_rate"] >= eval_stage2_threshold and
+                        full_stats["success_rate"]  >= eval_stage2_threshold and
+                        dual_stats["success_rate"]  >= eval_stage2_threshold)
+                stage2_streak = stage2_streak + 1 if meets else 0
+
+                print(f" [Stage2] streak={stage2_streak}/{eval_stage2_patience} (threshold={eval_stage2_threshold:.2f})")
+                if stage2_streak >= eval_stage2_patience:
                     agent.save(models_dir, "converged_model")
-                    print(f" Early-stop: all evals >= {es_threshold:.2f} for "
-                        f"{es_patience} eval(s). Stopping training.")
+                    print(f" Early-stop: all evals ≥ {eval_stage2_threshold:.2f} for "
+                        f"{eval_stage2_patience} evals. Stopping training.")
                     break
+                else:
+                    next_eval_ep = ep + eval_interval
 
         # Periodic checkpointing
         if ep % training_cfg.get("save_freq", 2000) == 0:
