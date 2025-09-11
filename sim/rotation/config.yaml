@@ -33,8 +33,9 @@ training:
   save_freq: 500
   save_dir: "models/"
   train_segment_mode: "short"
-
-  eval_early_stop:
-    enabled: true
-    threshold: 0.95
-    patience: 1
+  stage1_threshold: 0.85
+  stage1_patience: 20
+  stage1_interval: 50
+  stage2_threshold: 0.95
+  stage2_patience: 20
+  stage2_interval: 5
