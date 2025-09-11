@@ -139,13 +139,13 @@ def detect_and_grasp_object(spot, config, experiment_config):
     if config.autonomous_detection:
         print('Using autonomous box detection with OWL-v2 + SAM...')
         try:
-            # target_pixel = SpotPerception.find_grasp_sam(
-            #     color_img, depth_img, 
-            #     left=(config.robot_side == 'left'),
-            #     conf=0.15,
-            #     max_distance_m=3.0
-            # )
-            target_pixel = SpotPerception.get_red_object_center_of_mass(color_img)
+            target_pixel = SpotPerception.find_grasp_sam(
+                color_img, depth_img, 
+                left=(config.robot_side == 'left'),
+                conf=0.15,
+                max_distance_m=3.0
+            )
+            # target_pixel = SpotPerception.get_red_object_center_of_mass(color_img)
             if target_pixel is None:
                 print('Autonomous detection failed, falling back to manual selection')
                 target_pixel = SpotPerception.get_target_from_user(color_img)
@@ -173,8 +173,12 @@ def detect_and_grasp_object(spot, config, experiment_config):
     
     if not success:
         raise Exception('Failed to grasp object')
+
+    if not spot.check_grip():
+        raise Exception('Failed to grasp object')
+    else:
+        print('Object grasped successfully')
     
-    print('Object grasped successfully')
     print('Holding object for 3 seconds...')
     time.sleep(3)
     
