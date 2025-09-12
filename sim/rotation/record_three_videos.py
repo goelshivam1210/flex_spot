@@ -18,7 +18,12 @@ class VideoRecorder:
         self.data = data
         self.path_points_to_draw = path_points
         self.num_path_markers = 0
-        self.writer = imageio.get_writer(output_path, fps=fps)
+        self.writer = imageio.get_writer(
+            output_path,
+            fps=fps,
+            codec="libx264",
+            ffmpeg_params=["-pix_fmt", "yuv420p"]
+        )
 
         if getattr(model.vis.global_, "offwidth", 0) < width:
             model.vis.global_.offwidth = int(width)
@@ -35,15 +40,12 @@ class VideoRecorder:
         self.cam.elevation = -30.0
         self.cam.lookat = np.array([0.0, 0.0, 0.5], dtype=float)
 
-    def capture(self):
-        box_position = self.data.body('box').xpos
-        self.cam.lookat = box_position
-        self.renderer.update_scene(self.data, camera=self.cam)
-        self.renderer.scene.ngeom -= self.num_path_markers
-        if self.path_points_to_draw is not None:
-            self.num_path_markers = plot_path_markers(self.renderer.scene, self.path_points_to_draw)
-        pixels = self.renderer.render()
-        self.writer.append_data(pixels)
+def capture(self):
+    self.renderer.update_scene(self.data, camera=self.cam)
+    if self.path_points_to_draw is not None:
+        plot_path_markers(self.renderer.scene, self.path_points_to_draw)
+    frame = self.renderer.render()
+    self.writer.append_data(frame)
 
     def close(self):
         self.writer.close()
