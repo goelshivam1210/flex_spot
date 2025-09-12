@@ -13,12 +13,18 @@ from test_dual_force import DualForceTestEnv
 
 
 class VideoRecorder:
-    def __init__(self, model, data, output_path, width=800, height=600, fps=40, path_points=None):
+    def __init__(self, model, data, output_path, width=1280, height=720, fps=30, path_points=None):
         self.model = model
         self.data = data
         self.path_points_to_draw = path_points
         self.num_path_markers = 0
         self.writer = imageio.get_writer(output_path, fps=fps)
+
+        if getattr(model.vis.global_, "offwidth", 0) < width:
+            model.vis.global_.offwidth = int(width)
+        if getattr(model.vis.global_, "offheight", 0) < height:
+            model.vis.global_.offheight = int(height)
+
         self.renderer = mujoco.Renderer(model, height, width)
 
         self.cam = mujoco.MjvCamera()
