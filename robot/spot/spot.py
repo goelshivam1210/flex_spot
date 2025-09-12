@@ -356,7 +356,7 @@ class Spot:
                 break
         return True
 
-    def push_object(self, dx=0, dy=0, d_yaw=0, dt=10):
+    def push_object(self, dx=0, dy=0, d_yaw=0, vx=0.5, vy= 0.5, v_yaw=0.5, dt=10):
         """
         Push the grasped object by walking Spot's base in a given direction.
         Args:
@@ -388,13 +388,6 @@ class Spot:
                                                     disable_vision_foot_constraint_avoidance=True,
                                                     obstacle_avoidance_padding=.001)
 
-        # vx = dx/dt
-        # vy = dy/dt
-        # v_yaw = d_yaw/dt
-
-        vx = 0.5
-        vy = 0.5
-        v_yaw = 0.5
         speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
                 linear=Vec2(x=vx, y=vy), angular=v_yaw))        
         mobility_params = spot_command_pb2.MobilityParams(
@@ -610,10 +603,14 @@ if __name__ == "__main__":
 
     with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
         spot.power_on()
-        spot.stand_up()
+        spot.open_gripper()
+        spot.close_gripper()
+        spot.open_gripper()
+        # spot.stand_up()
 
         # 1. Save initial yaw
-        saved_yaw = spot.save_initial_yaw()
+        # saved_yaw = spot.save_initial_yaw()
+    
 
         # 2. Walk forward by 1 meter (no rotation)
         # walk_distance = 1.5  # meters

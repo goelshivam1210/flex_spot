@@ -139,13 +139,13 @@ def detect_and_grasp_object(spot, config, experiment_config):
     if config.autonomous_detection:
         print('Using autonomous box detection with OWL-v2 + SAM...')
         try:
-            target_pixel = SpotPerception.find_grasp_sam(
-                color_img, depth_img, 
-                left=(config.robot_side == 'left'),
-                conf=0.15,
-                max_distance_m=3.0
-            )
-            # target_pixel = SpotPerception.get_red_object_center_of_mass(color_img)
+            # target_pixel = SpotPerception.find_grasp_sam(
+            #     color_img, depth_img, 
+            #     left=(config.robot_side == 'left'),
+            #     conf=0.15,
+            #     max_distance_m=3.0
+            # )
+            target_pixel = SpotPerception.get_red_object_center_of_mass(color_img)
             if target_pixel is None:
                 print('Autonomous detection failed, falling back to manual selection')
                 target_pixel = SpotPerception.get_target_from_user(color_img)
@@ -291,21 +291,41 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         
         # Execute movement based on task type
         try:
-            if experiment_config["task_type"] == "push":
+            if experiment_config["task_type"] == "push":                
+                # For pushing: move robot body while maintaining arm position
                 print('Pushing object by moving robot...')
-                target_position = current_hand_pos - scaled_action[:3]  # Note the minus sign
-                target_pose = SE3Pose(
-                    x=target_position[0],
-                    y=target_position[1], 
-                    z=target_position[2],
-                    rot=current_hand_pose.rot
+                dx = scaled_action[0]
+                dy = scaled_action[1]
+                d_yaw = scaled_action[2] if len(scaled_action) > 2 else 0
+                dt = 2
+                vx = abs(dx/dt)
+                vy = abs(dy/dt)
+                v_yaw = abs(d_yaw/dt)
+
+                spot.push_object(
+                    dx=dx, 
+                    dy=dy, 
+                    d_yaw=d_yaw,
+                    vx=vx,
+                    vy=vy,
+                    v_yaw=v_yaw,
+                    dt=2.0
                 )
+
+                # print('Pushing object by moving robot...')
+                # target_position = current_hand_pos - scaled_action[:3]  # Note the minus sign
+                # target_pose = SE3Pose(
+                #     x=target_position[0],
+                #     y=target_position[1], 
+                #     z=target_position[2],
+                #     rot=current_hand_pose.rot
+                # )
                 
-                arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
-                    target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
-                )
-                cmd_id = spot._client._command_client.robot_command(arm_cmd)
-                block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
+                # arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
+                #     target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
+                # )
+                # cmd_id = spot._client._command_client.robot_command(arm_cmd)
+                # block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
                 # For pushing: move robot body while maintaining arm position
             else:  # drag
                 # For dragging: move arm to pull object
@@ -482,13 +502,3 @@ if __name__ == '__main__':
 
 
 
-                #     if experiment_config["task_type"] == "push":
-                
-                # # For pushing: move robot body while maintaining arm position
-                # print('Pushing object by moving robot...')
-                # spot.push_object(
-                #     dx=-scaled_action[0], 
-                #     dy=-scaled_action[1], 
-                #     d_yaw=scaled_action[2] if len(scaled_action) > 2 else 0,
-                #     dt=2.0
-                # )
