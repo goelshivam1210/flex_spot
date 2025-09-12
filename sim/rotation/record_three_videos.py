@@ -40,12 +40,12 @@ class VideoRecorder:
         self.cam.elevation = -30.0
         self.cam.lookat = np.array([0.0, 0.0, 0.5], dtype=float)
 
-def capture(self):
-    self.renderer.update_scene(self.data, camera=self.cam)
-    if self.path_points_to_draw is not None:
-        plot_path_markers(self.renderer.scene, self.path_points_to_draw)
-    frame = self.renderer.render()
-    self.writer.append_data(frame)
+    def capture(self):
+        self.renderer.update_scene(self.data, camera=self.cam)
+        if self.path_points_to_draw is not None:
+            plot_path_markers(self.renderer.scene, self.path_points_to_draw)
+        frame = self.renderer.render()
+        self.writer.append_data(frame)
 
     def close(self):
         self.writer.close()
