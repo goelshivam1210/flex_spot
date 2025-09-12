@@ -25,7 +25,9 @@ import sys
 import time
 import numpy as np
 import math
-import os  
+import os
+import matplotlib.pyplot as plt
+from datetime import datetime  
 
 # Import Spot SDK modules
 from bosdyn.client.lease import LeaseKeepAlive
@@ -69,6 +71,115 @@ EXPERIMENT_CONFIGS = {
         "max_force_scale": 0.6
     }
 }
+
+
+def plot_trajectory(robot_positions, path_points, experiment_name, save_path=None):
+    """
+    Plot robot trajectory and planned path in vision frame.
+    
+    Args:
+        robot_positions: List of (x, y, yaw) tuples representing robot positions
+        path_points: Array of planned path points (Nx3 array with x, y, z)
+        experiment_name: Name of the experiment for title
+        save_path: Optional path to save the plot
+    """
+    plt.figure(figsize=(12, 10))
+    
+    # Convert robot positions to arrays
+    robot_positions = np.array(robot_positions)
+    robot_x = robot_positions[:, 0]
+    robot_y = robot_positions[:, 1]
+    robot_yaw = robot_positions[:, 2]
+    
+    # Plot planned path
+    plt.plot(path_points[:, 0], path_points[:, 1], 'b-', linewidth=2, 
+             label='Planned Path', alpha=0.7)
+    plt.scatter(path_points[0, 0], path_points[0, 1], color='green', 
+                s=100, marker='o', label='Start Point', zorder=5)
+    plt.scatter(path_points[-1, 0], path_points[-1, 1], color='red', 
+                s=100, marker='s', label='End Point', zorder=5)
+    
+    # Plot robot trajectory
+    plt.plot(robot_x, robot_y, 'r-', linewidth=2, 
+             label='Robot Trajectory', alpha=0.8)
+    plt.scatter(robot_x[0], robot_y[0], color='darkgreen', 
+                s=100, marker='^', label='Robot Start', zorder=5)
+    plt.scatter(robot_x[-1], robot_y[-1], color='darkred', 
+                s=100, marker='v', label='Robot End', zorder=5)
+    
+    # Add arrows to show robot orientation at key points
+    step_size = max(1, len(robot_x) // 10)  # Show arrows every 10% of trajectory
+    for i in range(0, len(robot_x), step_size):
+        dx = 0.1 * np.cos(robot_yaw[i])
+        dy = 0.1 * np.sin(robot_yaw[i])
+        plt.arrow(robot_x[i], robot_y[i], dx, dy, 
+                 head_width=0.05, head_length=0.05, fc='orange', ec='orange', alpha=0.7)
+    
+    plt.xlabel('X Position (meters)')
+    plt.ylabel('Y Position (meters)')
+    plt.title(f'Robot Trajectory vs Planned Path - {experiment_name}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.axis('equal')
+    
+    # Add text box with statistics
+    total_distance = np.sum(np.sqrt(np.diff(robot_x)**2 + np.diff(robot_y)**2))
+    path_length = np.sum(np.sqrt(np.diff(path_points[:, 0])**2 + np.diff(path_points[:, 1])**2))
+    final_error = np.sqrt((robot_x[-1] - path_points[-1, 0])**2 + (robot_y[-1] - path_points[-1, 1])**2)
+    
+    stats_text = f'Total Distance: {total_distance:.2f}m\n'
+    stats_text += f'Path Length: {path_length:.2f}m\n'
+    stats_text += f'Final Error: {final_error:.2f}m\n'
+    stats_text += f'Steps: {len(robot_x)}'
+    
+    plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes, 
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to: {save_path}")
+    
+    plt.show()
+
+
+def plot_position_over_time(robot_positions, experiment_name, save_path=None):
+    """
+    Plot robot position components over time.
+    
+    Args:
+        robot_positions: List of (x, y, yaw) tuples representing robot positions
+        experiment_name: Name of the experiment for title
+        save_path: Optional path to save the plot
+    """
+    robot_positions = np.array(robot_positions)
+    time_steps = np.arange(len(robot_positions))
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+    
+    # X position
+    ax1.plot(time_steps, robot_positions[:, 0], 'b-', linewidth=2)
+    ax1.set_ylabel('X Position (m)')
+    ax1.set_title(f'Robot Position Over Time - {experiment_name}')
+    ax1.grid(True, alpha=0.3)
+    
+    # Y position
+    ax2.plot(time_steps, robot_positions[:, 1], 'g-', linewidth=2)
+    ax2.set_ylabel('Y Position (m)')
+    ax2.grid(True, alpha=0.3)
+    
+    # Yaw angle
+    ax3.plot(time_steps, np.degrees(robot_positions[:, 2]), 'r-', linewidth=2)
+    ax3.set_ylabel('Yaw Angle (degrees)')
+    ax3.set_xlabel('Time Step')
+    ax3.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Position plot saved to: {save_path}")
+    
+    plt.show()
 
 
 def user_confirm_step(step_description):
@@ -261,6 +372,9 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     path_points = path_info['path_points']
     start_position = path_info['start_position']
     
+    # Initialize position tracking
+    robot_positions = []
+    
     print(f"Starting path-following execution")
     print(f"Max steps: {config.max_steps}, Action scale: {config.action_scale}")
     
@@ -277,6 +391,9 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         
         # Get current robot orientation
         current_x, current_y, current_yaw = spot.get_current_pose()
+        
+        # Track robot position in vision frame
+        robot_positions.append((current_x, current_y, current_yaw))
         
         # estimate the box center from grasp
         box_center = interactive_perception.estimate_box_center_from_grasp(
@@ -374,6 +491,28 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     
     print(f"Policy execution completed. Success: {manipulation_success}")
     time.sleep(2)  # Hold position to observe
+    
+    # Generate plots (unless disabled)
+    if not hasattr(config, 'no_plots') or not config.no_plots:
+        print("Generating trajectory plots...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        experiment_name = f"{config.experiment}_{timestamp}"
+        
+        # Create plots directory if it doesn't exist
+        plots_dir = "plots"
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Plot trajectory comparison
+        trajectory_plot_path = os.path.join(plots_dir, f"trajectory_{experiment_name}.png")
+        plot_trajectory(robot_positions, path_points, experiment_name, trajectory_plot_path)
+        
+        # Plot position over time
+        position_plot_path = os.path.join(plots_dir, f"position_over_time_{experiment_name}.png")
+        plot_position_over_time(robot_positions, experiment_name, position_plot_path)
+        
+        print(f"Plots saved to {plots_dir}/ directory")
+    else:
+        print("Plotting disabled by user")
     
     return manipulation_success
 
@@ -500,6 +639,8 @@ def main():
                         help='Use autonomous box detection instead of manual selection')
     parser.add_argument('--robot-side', choices=['left', 'right'], default='left',
                         help='Robot side for multi-robot coordination (affects grasp point selection)')
+    parser.add_argument('--no-plots', action='store_true',
+                        help='Disable trajectory plotting')
     
     options = parser.parse_args()
     
