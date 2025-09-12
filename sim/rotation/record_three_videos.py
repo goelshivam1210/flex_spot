@@ -28,12 +28,16 @@ class VideoRecorder:
         self.renderer = mujoco.Renderer(model, height, width)
 
         self.cam = mujoco.MjvCamera()
+        mujoco.mjv_defaultCamera(self.cam)
+        self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         self.cam.distance = 7.5
         self.cam.azimuth = 90.0
         self.cam.elevation = -30.0
-        self.cam.lookat = np.array([0.0, 0.0, 0.5])
+        self.cam.lookat = np.array([0.0, 0.0, 0.5], dtype=float)
 
     def capture(self):
+        box_position = self.data.body('box').xpos
+        self.cam.lookat = box_position
         self.renderer.update_scene(self.data, camera=self.cam)
         self.renderer.scene.ngeom -= self.num_path_markers
         if self.path_points_to_draw is not None:
@@ -172,6 +176,8 @@ def main():
     short_agent = load_trained_model(model_base, short_env)
 
     short_out = os.path.join(videos_dir, "short.mp4")
+    short_env.reset()
+
     short_rec = VideoRecorder(short_env.model, short_env.data, short_out,
                               width=args.width, height=args.height, fps=args.fps,
                               path_points=getattr(short_env, "path_points", None))
@@ -190,6 +196,7 @@ def main():
     full_agent = load_trained_model(model_base, full_env)
 
     full_out = os.path.join(videos_dir, "full.mp4")
+    full_env.reset()
     full_rec = VideoRecorder(full_env.model, full_env.data, full_out,
                              width=args.width, height=args.height, fps=args.fps,
                              path_points=getattr(full_env, "path_points", None))
@@ -208,6 +215,7 @@ def main():
     dual_agent = load_trained_model(model_base, dual_env)
 
     dual_out = os.path.join(videos_dir, "dual.mp4")
+    dual_env.reset()
     dual_rec = VideoRecorder(dual_env.model, dual_env.data, dual_out,
                              width=args.width, height=args.height, fps=args.fps,
                              path_points=getattr(dual_env, "path_points", None))
