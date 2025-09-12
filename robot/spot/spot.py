@@ -411,6 +411,75 @@ class Spot:
         cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_t)
         time.sleep(dt+1)
 
+    def push_object_vf(self, dx=0, dy=0, d_yaw=0, vx=0.5, vy=0.5, v_yaw=0.5, dt=10):
+        """
+        Push the grasped object by walking Spot's base in a given direction in the VISION frame.
+        Args:
+            dx, dy, d_yaw: Delta movements in the VISION frame (meters and radians).
+            vx, vy, v_yaw: Velocity limits for the movement.
+            dt: Duration of the movement in seconds.
+        """
+        # Get current robot state and transforms
+        robot_state_client = self._client._state_client
+        robot_state = robot_state_client.get_robot_state()
+        snapshot = robot_state.kinematic_state.transforms_snapshot
+        
+        # Get current pose in vision frame
+        vision_tform_body = get_se2_a_tform_b(snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
+        current_x = vision_tform_body.x
+        current_y = vision_tform_body.y
+        current_yaw = vision_tform_body.angle
+        
+        # Calculate target pose in vision frame
+        target_x = current_x + dx
+        target_y = current_y + dy
+        target_yaw = current_yaw + d_yaw
+        
+        print(f"{self.id}: Pushing in vision frame - Current: ({current_x:.2f}, {current_y:.2f}, {current_yaw:.2f})")
+        print(f"{self.id}: Target: ({target_x:.2f}, {target_y:.2f}, {target_yaw:.2f})")
+        
+        # Set up obstacle avoidance parameters
+        obstacles = spot_command_pb2.ObstacleParams(
+            disable_vision_body_obstacle_avoidance=True,
+            disable_vision_foot_obstacle_avoidance=False,
+            disable_vision_foot_constraint_avoidance=False,
+            obstacle_avoidance_padding=.001
+        )
+        
+        # Set up velocity limits
+        speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
+            linear=Vec2(x=vx, y=vy), 
+            angular=v_yaw
+        ))
+        
+        mobility_params = spot_command_pb2.MobilityParams(
+            obstacle_params=obstacles, 
+            vel_limit=speed_limit,
+            locomotion_hint=spot_command_pb2.HINT_AUTO
+        )
+        
+        # Freeze arm to maintain grasp
+        command_arm = RobotCommandBuilder.arm_joint_freeze_command()
+        
+        # Create trajectory command in vision frame
+        traj_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
+            goal_x=target_x,
+            goal_y=target_y,
+            goal_heading=target_yaw,
+            frame_name=VISION_FRAME_NAME,
+            params=mobility_params,
+            build_on_command=command_arm
+        )
+        
+        # Execute command
+        command_client = self._client._command_client
+        end_t = time.time() + dt
+        cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_t)
+        
+        print(f"{self.id}: Push command sent, waiting {dt} seconds...")
+        time.sleep(dt + 1)
+        print(f"{self.id}: Push complete.")
+
 
         # # 3. Build mobility command to walk in the desired direction
         # move_x = direction_x * distance
