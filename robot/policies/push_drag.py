@@ -204,8 +204,11 @@ def define_path_and_direction(spot, config, experiment_config):
     
     if experiment_config["task_type"] == "push":
         # Push: forward arc curving right
-        start_angle = -np.pi/6  # -30 degrees
-        end_angle = np.pi/6     # +30 degrees
+        # start_angle = -np.pi/6  # -30 degrees
+        start_angle = -np.pi/4
+        start_angle = 0 
+        # end_angle = np.pi/6     # +30 degrees
+        end_angle = np.pi/3 
         arc_center = start_position[:2]  # Center at current position
     else:  # drag
         # Drag: backward arc curving left  
@@ -308,12 +311,13 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
                 dx = scaled_action[0]
                 dy = scaled_action[1]
                 d_yaw = scaled_action[2] if len(scaled_action) > 2 else 0
+                # d_yaw = 0
                 dt = 2
                 vx = abs(dx/dt)
                 vy = abs(dy/dt)
                 v_yaw = abs(d_yaw/dt)
 
-                spot.push_object(
+                spot.push_object_from_sim(
                     dx=dx, 
                     dy=dy, 
                     d_yaw=d_yaw,

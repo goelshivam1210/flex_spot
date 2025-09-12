@@ -475,8 +475,8 @@ class Spot:
         # Set up obstacle avoidance parameters
         obstacles = spot_command_pb2.ObstacleParams(
             disable_vision_body_obstacle_avoidance=True,
-            disable_vision_foot_obstacle_avoidance=False,
-            disable_vision_foot_constraint_avoidance=False,
+            disable_vision_foot_obstacle_avoidance=True,
+            disable_vision_foot_constraint_avoidance=True,
             obstacle_avoidance_padding=.001
         )
         
@@ -514,7 +514,7 @@ class Spot:
         time.sleep(dt + 1)
         print(f"{self.id}: Push complete.")
 
-    def push_object_from_sim(self, sim_dx=0, sim_dy=0, sim_d_yaw=0, vx=0.5, vy=0.5, v_yaw=0.5, dt=10, initial_pose=None):
+    def push_object_from_sim(self, dx=0, dy=0, d_yaw=0, vx=0.5, vy=0.5, v_yaw=0.5, dt=10, initial_pose=None):
         """
         Push object using simulation commands that are automatically transformed to vision frame.
         
@@ -527,7 +527,7 @@ class Spot:
         """
         # Transform simulation commands to vision frame
         vision_dx, vision_dy, vision_d_yaw = self.transform_sim_to_vision_frame(
-            sim_dx, sim_dy, sim_d_yaw, initial_pose
+            dx, dy, d_yaw, initial_pose
         )
         
         # Execute the push with transformed commands
