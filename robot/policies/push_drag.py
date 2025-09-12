@@ -185,8 +185,8 @@ def detect_and_grasp_object(spot, config, experiment_config):
     return target_pixel
 
 def define_path_and_direction(spot, config, experiment_config):
-    """Define straight-line path for push/drag operation."""
-    print('Defining path for push/drag operation')
+    """Define curved arc path for push/drag operation."""
+    print('Defining curved arc path for push/drag operation')
     
     # Get current hand position as start point
     robot_state = spot._client._state_client.get_robot_state()
@@ -197,39 +197,42 @@ def define_path_and_direction(spot, config, experiment_config):
         raise Exception("Could not get hand pose for path definition")
     
     start_position = np.array([vision_T_hand.x, vision_T_hand.y, vision_T_hand.z])
-    
-    # Get current robot orientation to define forward direction
     current_x, current_y, current_yaw = spot.get_current_pose()
     
-    # Define path direction based on experiment type and robot orientation
+    # Define arc parameters based on target distance
+    arc_radius = config.target_distance  # Use target distance as radius
+    
     if experiment_config["task_type"] == "push":
-        # Push: move forward relative to robot
-        direction_vector = np.array([
-            math.cos(current_yaw),
-            math.sin(current_yaw), 
-            0.0
-        ])
+        # Push: forward arc curving right
+        start_angle = -np.pi/6  # -30 degrees
+        end_angle = np.pi/6     # +30 degrees
+        arc_center = start_position[:2]  # Center at current position
     else:  # drag
-        # Drag: move backward relative to robot
-        direction_vector = np.array([
-            -math.cos(current_yaw),
-            -math.sin(current_yaw),
-            0.0
-        ])
+        # Drag: backward arc curving left  
+        start_angle = np.pi - np.pi/6   # 150 degrees
+        end_angle = np.pi + np.pi/6     # 210 degrees
+        arc_center = start_position[:2]
     
-    # Define target end position
-    target_distance = config.target_distance
-    end_position = start_position + (direction_vector * target_distance)
-    
-    # Use InteractivePerception to generate path points
+    # Generate arc path points
     interactive_perception = InteractivePerception()
-    path_points = interactive_perception.generate_straight_line_path(
-        start_position, end_position, num_points=max(10, int(target_distance * 20))
+    path_points_2d = interactive_perception.generate_arc_path(
+        center=arc_center,
+        radius=arc_radius,
+        start_angle=start_angle,
+        end_angle=end_angle,
+        num_points=max(10, int(config.target_distance * 20))
     )
     
-    print(f'Path defined: {len(path_points)} points from {start_position} to {end_position}')
-    print(f'Total distance: {target_distance:.2f}m')
-    print(f'Direction: {experiment_config["task_type"]} ({direction_vector[:2]})')
+    # Add z-coordinate (keep constant height)
+    path_points = np.column_stack([path_points_2d, np.full(len(path_points_2d), start_position[2])])
+    
+    end_position = path_points[-1]
+    direction_vector = (end_position - start_position)[:2]  # 2D direction
+    direction_vector = direction_vector / np.linalg.norm(direction_vector)
+    
+    print(f'Arc path defined: {len(path_points)} points from {start_position} to {end_position}')
+    print(f'Arc radius: {arc_radius:.2f}m, Angles: {np.degrees(start_angle):.1f}° to {np.degrees(end_angle):.1f}°')
+    print(f'Direction: {experiment_config["task_type"]} (arc curve)')
     
     return {
         'start_position': start_position,
@@ -272,6 +275,14 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         # Get current robot orientation
         current_x, current_y, current_yaw = spot.get_current_pose()
         
+        # estimate the box center from grasp
+        box_center = interactive_perception.estimate_box_center_from_grasp(
+            current_hand_pos, 
+            experiment_config["grasp_strategy"], 
+            box_dimensions={"width": 0.6, "depth": 0.4, "height": 0.8}, 
+            current_yaw=current_yaw
+        )
+
         # Construct state vector for path-following policy
         state_vector = interactive_perception.construct_path_following_state(
             current_hand_pos, path_points, current_yaw, closest_path_idx
@@ -345,7 +356,7 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
                 block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
             
             # Update closest path index for state computation
-            closest_path_idx = interactive_perception.update_closest_path_index(current_hand_pos, path_points, closest_path_idx)
+            closest_path_idx = interactive_perception.update_closest_path_index(box_center, path_points, closest_path_idx)
             
             # Check success
             if check_path_following_success(current_hand_pos, path_info, config.success_distance):
