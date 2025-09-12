@@ -411,6 +411,40 @@ class Spot:
         cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_t)
         time.sleep(dt+1)
 
+    def transform_sim_to_vision_frame(self, sim_dx, sim_dy, sim_d_yaw, initial_pose=None):
+        """
+        Transform simulation commands to vision frame coordinates.
+        
+        Args:
+            sim_dx, sim_dy, sim_d_yaw: Commands from simulation (assuming sim starts at 0,0,0)
+            initial_pose: (x, y, yaw) tuple of robot's initial pose in vision frame.
+                          If None, uses current pose as reference.
+        
+        Returns:
+            (dx, dy, d_yaw): Commands transformed to vision frame
+        """
+        if initial_pose is None:
+            # Use current pose as reference
+            current_x, current_y, current_yaw = self.get_current_pose()
+            initial_pose = (current_x, current_y, current_yaw)
+        
+        init_x, init_y, init_yaw = initial_pose
+        
+        # Create rotation matrix for initial yaw
+        cos_yaw = math.cos(init_yaw)
+        sin_yaw = math.sin(init_yaw)
+        
+        # Rotate the simulation deltas by the initial yaw
+        # This accounts for the robot's initial orientation
+        vision_dx = cos_yaw * sim_dx - sin_yaw * sim_dy
+        vision_dy = sin_yaw * sim_dx + cos_yaw * sim_dy
+        vision_d_yaw = sim_d_yaw  # Yaw rotation is the same in any frame
+        
+        print(f"{self.id}: Sim commands: dx={sim_dx:.3f}, dy={sim_dy:.3f}, d_yaw={sim_d_yaw:.3f}")
+        print(f"{self.id}: Vision commands: dx={vision_dx:.3f}, dy={vision_dy:.3f}, d_yaw={vision_d_yaw:.3f}")
+        
+        return vision_dx, vision_dy, vision_d_yaw
+
     def push_object_vf(self, dx=0, dy=0, d_yaw=0, vx=0.5, vy=0.5, v_yaw=0.5, dt=10):
         """
         Push the grasped object by walking Spot's base in a given direction in the VISION frame.
@@ -479,6 +513,25 @@ class Spot:
         print(f"{self.id}: Push command sent, waiting {dt} seconds...")
         time.sleep(dt + 1)
         print(f"{self.id}: Push complete.")
+
+    def push_object_from_sim(self, sim_dx=0, sim_dy=0, sim_d_yaw=0, vx=0.5, vy=0.5, v_yaw=0.5, dt=10, initial_pose=None):
+        """
+        Push object using simulation commands that are automatically transformed to vision frame.
+        
+        Args:
+            sim_dx, sim_dy, sim_d_yaw: Commands from simulation (assuming sim starts at 0,0,0)
+            vx, vy, v_yaw: Velocity limits for the movement.
+            dt: Duration of the movement in seconds.
+            initial_pose: (x, y, yaw) tuple of robot's initial pose in vision frame.
+                          If None, uses current pose as reference.
+        """
+        # Transform simulation commands to vision frame
+        vision_dx, vision_dy, vision_d_yaw = self.transform_sim_to_vision_frame(
+            sim_dx, sim_dy, sim_d_yaw, initial_pose
+        )
+        
+        # Execute the push with transformed commands
+        self.push_object_vf(vision_dx, vision_dy, vision_d_yaw, vx, vy, v_yaw, dt)
 
 
         # # 3. Build mobility command to walk in the desired direction
