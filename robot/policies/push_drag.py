@@ -40,33 +40,33 @@ from flex.policy_manager import PolicyManager
 
 # Experiment configurations
 EXPERIMENT_CONFIGS = {
-    "small_box_no_handle_1robot": {
-        "description": "Small box without handle, single robot",
+    "small_box_no_handle_push": {
+        "description": "Small box without handle, push task",
         "grasp_strategy": "edge_grasp",
         "task_type": "push",
         "expected_distance": 1.0,
         "max_force_scale": 0.8
     },
-    "large_box_no_handle_2robots": {
-        "description": "Large box without handle, dual robot (coordinated)",
-        "grasp_strategy": "edge_grasp", 
-        "task_type": "push",
-        "expected_distance": 1.5,
-        "max_force_scale": 1.0
-    },
-    "small_box_handle_1robot": {
-        "description": "Small box with handle, single robot",
-        "grasp_strategy": "handle_grasp",
-        "task_type": "drag", 
+    "small_box_no_handle_drag": {
+        "description": "Small box without handle, drag task", 
+        "grasp_strategy": "edge_grasp",
+        "task_type": "drag",
         "expected_distance": 1.0,
-        "max_force_scale": 0.6
+        "max_force_scale": 0.8
     },
-    "large_box_handle_2robots": {
-        "description": "Large box with handle, dual robot (coordinated)",
+    "small_box_handle_push": {
+        "description": "Small box with handle, push task",
+        "grasp_strategy": "handle_grasp", 
+        "task_type": "push",
+        "expected_distance": 1.0,
+        "max_force_scale": 0.8
+    },
+    "small_box_handle_drag": {
+        "description": "Small box with handle, drag task",
         "grasp_strategy": "handle_grasp",
         "task_type": "drag",
-        "expected_distance": 1.5,
-        "max_force_scale": 0.8
+        "expected_distance": 1.0,
+        "max_force_scale": 0.6
     }
 }
 
@@ -292,16 +292,25 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         # Execute movement based on task type
         try:
             if experiment_config["task_type"] == "push":
-                # For pushing: move robot body while maintaining arm position
-                spot.push_object(
-                    dx=scaled_action[0], 
-                    dy=scaled_action[1], 
-                    d_yaw=scaled_action[2] if len(scaled_action) > 2 else 0,
-                    dt=2.0
+                print('Pushing object by moving robot...')
+                target_position = current_hand_pos - scaled_action[:3]  # Note the minus sign
+                target_pose = SE3Pose(
+                    x=target_position[0],
+                    y=target_position[1], 
+                    z=target_position[2],
+                    rot=current_hand_pose.rot
                 )
+                
+                arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
+                    target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
+                )
+                cmd_id = spot._client._command_client.robot_command(arm_cmd)
+                block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
+                # For pushing: move robot body while maintaining arm position
             else:  # drag
                 # For dragging: move arm to pull object
-                target_position = current_hand_pos + scaled_action[:3]
+                print('Moving arm to drag object...')
+                target_position = current_hand_pos + scaled_action[:3]  # Note the minus sign
                 target_pose = SE3Pose(
                     x=target_position[0],
                     y=target_position[1], 
@@ -431,7 +440,7 @@ def main():
                         help='Docking station ID')
     parser.add_argument('--max-steps',
                         type=int,
-                        default=50,
+                        default=15,
                         help='Maximum policy execution steps')
     parser.add_argument('--action-scale', 
                         type=float,
@@ -470,3 +479,16 @@ def main():
 if __name__ == '__main__':
     if not main():
         sys.exit(1)
+
+
+
+                #     if experiment_config["task_type"] == "push":
+                
+                # # For pushing: move robot body while maintaining arm position
+                # print('Pushing object by moving robot...')
+                # spot.push_object(
+                #     dx=-scaled_action[0], 
+                #     dy=-scaled_action[1], 
+                #     d_yaw=scaled_action[2] if len(scaled_action) > 2 else 0,
+                #     dt=2.0
+                # )
