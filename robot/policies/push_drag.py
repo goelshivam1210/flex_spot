@@ -49,28 +49,28 @@ EXPERIMENT_CONFIGS = {
         "description": "Small box without handle, push task",
         "grasp_strategy": "edge_grasp",
         "task_type": "push",
-        "expected_distance": 1.0,
+        "expected_distance": 1.5,
         "max_force_scale": 0.8
     },
     "small_box_no_handle_drag": {
         "description": "Small box without handle, drag task", 
         "grasp_strategy": "edge_grasp",
         "task_type": "drag",
-        "expected_distance": 1.0,
+        "expected_distance": 1.5,
         "max_force_scale": 0.8
     },
     "small_box_handle_push": {
         "description": "Small box with handle, push task",
         "grasp_strategy": "handle_grasp", 
         "task_type": "push",
-        "expected_distance": 1.0,
+        "expected_distance": 1.5,
         "max_force_scale": 0.8
     },
     "small_box_handle_drag": {
         "description": "Small box with handle, drag task",
         "grasp_strategy": "handle_grasp",
         "task_type": "drag",
-        "expected_distance": 1.0,
+        "expected_distance": 1.5,
         "max_force_scale": 0.6
     }
 }
@@ -405,6 +405,10 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     
     # Initialize position tracking
     box_positions = []
+
+    # velocity tracking:
+    prev_box_center = None
+    prev_step_time = None
     
     print(f"Starting path-following execution")
     print(f"Max steps: {config.max_steps}, Action scale: {config.action_scale}")
@@ -433,14 +437,42 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
             current_yaw=current_yaw
         )
 
+        # Calculate velocity for state construction
+        current_step_time = time.time()
+        if step == 0:
+            speed_along_path = 0.0
+            prev_box_center = box_center.copy()
+            prev_step_time = current_step_time
+        else:
+            dt = current_step_time - prev_step_time
+            if dt > 0:
+                displacement = box_center[:2] - prev_box_center[:2]
+                velocity_2d = displacement / dt
+                # We'll pass this to construct_path_following_state
+            else:
+                velocity_2d = np.array([0.0, 0.0])
+            
+            prev_box_center = box_center.copy()
+            prev_step_time = current_step_time
+
         # Track robot position in vision frame
         box_positions.append((box_center[0], box_center[1], current_yaw))
 
         # Construct state vector for path-following policy
-        state_vector = interactive_perception.construct_path_following_state(
-            current_hand_pos, path_points, current_yaw, closest_path_idx
-        )
+        # state_vector = interactive_perception.construct_path_following_state(
+            # current_hand_pos, path_points, current_yaw, closest_path_idx
+        # )
         
+        # Construct state vector for path-following policy
+        if step == 0:
+            state_vector = interactive_perception.construct_path_following_state(
+                box_center, path_points, current_yaw, closest_path_idx
+            )
+        else:
+            # do velocity tracking for later steps
+            state_vector = interactive_perception.construct_path_following_state(
+                box_center, path_points, current_yaw, closest_path_idx, velocity_2d=velocity_2d
+            )
         # Get action from policy
         action = policy.select_action(state_vector)
         if len(action.shape) > 1:
@@ -513,7 +545,7 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
             closest_path_idx = interactive_perception.update_closest_path_index(box_center, path_points, closest_path_idx)
             
             # Check success
-            if check_path_following_success(current_hand_pos, path_info, config.success_distance):
+            if check_path_following_success(box_center, path_info, config.success_distance):
                 print(f"Path following completed successfully in {step+1} steps!")
                 manipulation_success = True
                 break

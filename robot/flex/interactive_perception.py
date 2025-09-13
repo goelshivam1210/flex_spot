@@ -290,7 +290,7 @@ class InteractivePerception:
         return box_center
     
     def construct_path_following_state(self, current_pos, path_points, current_yaw, closest_idx, 
-                                       grasp_strategy="edge_grasp", box_dimensions = None):
+                                       grasp_strategy="edge_grasp", box_dimensions = None, velocity_2d=None):
         """
         Construct 8D state vector for path-following policy.
         
@@ -367,8 +367,11 @@ class InteractivePerception:
         # Calculate deviation from path
         deviation = np.linalg.norm(position_error)
         
-        # Calculate speed along path (simplified - could use position history)
-        speed_along_path = 0.0  # For now, set to 0 (could be enhanced with velocity tracking)
+        # Calculate speed along path using provided velocity
+        if velocity_2d is not None:
+            speed_along_path = np.dot(velocity_2d, path_tangent[:2])  # Project velocity onto path tangent
+        else:
+            speed_along_path = 0.0  # Default for first step or when velocity unavailable
         
         # Robot/box orientation unit vectors
         box_forward_x = math.cos(current_yaw)
