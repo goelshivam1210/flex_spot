@@ -441,7 +441,6 @@ class Spot:
         vision_d_yaw = sim_d_yaw  # Yaw rotation is the same in any frame
         
         print(f"{self.id}: Sim commands: dx={sim_dx:.3f}, dy={sim_dy:.3f}, d_yaw={sim_d_yaw:.3f}")
-        print(f"{self.id}: Initial pose: ({init_x:.3f}, {init_y:.3f}, {math.degrees(init_yaw):.1f}°)")
         print(f"{self.id}: Vision commands: dx={vision_dx:.3f}, dy={vision_dy:.3f}, d_yaw={vision_d_yaw:.3f}")
         
         return vision_dx, vision_dy, vision_d_yaw
