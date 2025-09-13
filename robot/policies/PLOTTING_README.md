@@ -80,6 +80,12 @@ Example filenames:
 - Y-axis: Left direction from robot's initial pose
 - Yaw: Rotation around Z-axis (positive = counterclockwise)
 
+### Path Generation
+- Arc paths are generated in local coordinate system (centered at origin)
+- Path points are transformed to vision frame accounting for robot orientation
+- Transformation includes both rotation (by robot's yaw) and translation (to robot position)
+- This ensures paths are correctly oriented regardless of robot's starting pose
+
 ### Data Collection
 - Position data is collected at each policy step
 - Uses `spot.get_current_pose()` for robot position

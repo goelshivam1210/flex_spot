@@ -307,8 +307,12 @@ def define_path_and_direction(spot, config, experiment_config):
     if vision_T_hand is None:
         raise Exception("Could not get hand pose for path definition")
     
-    start_position = np.array([vision_T_hand.x, vision_T_hand.y, vision_T_hand.z])
+    # Get robot pose in vision frame
     current_x, current_y, current_yaw = spot.get_current_pose()
+    
+    # Use robot position as start position (not hand position) for path planning
+    # This ensures the path is relative to the robot's base, not the hand
+    start_position = np.array([current_x, current_y, vision_T_hand.z])
     
     # Define arc parameters based on target distance
     arc_radius = config.target_distance  # Use target distance as radius
@@ -320,25 +324,45 @@ def define_path_and_direction(spot, config, experiment_config):
         start_angle = 0 
         # end_angle = np.pi/6     # +30 degrees
         end_angle = np.pi/3 
-        arc_center = start_position[:2]  # Center at current position
     else:  # drag
         # Drag: backward arc curving left  
         start_angle = np.pi - np.pi/6   # 150 degrees
         end_angle = np.pi + np.pi/6     # 210 degrees
-        arc_center = start_position[:2]
     
-    # Generate arc path points
+    # Generate arc path points in local coordinate system
     interactive_perception = InteractivePerception()
-    path_points_2d = interactive_perception.generate_arc_path(
-        center=arc_center,
+    path_points_2d_local = interactive_perception.generate_arc_path(
+        center=np.array([0, 0]),  # Generate arc centered at origin
         radius=arc_radius,
         start_angle=start_angle,
         end_angle=end_angle,
         num_points=max(10, int(config.target_distance * 20))
     )
     
+    # Transform arc points to vision frame
+    # Account for robot's current orientation in vision frame
+    cos_yaw = np.cos(current_yaw)
+    sin_yaw = np.sin(current_yaw)
+    
+    # Rotation matrix to transform from local to vision frame
+    rotation_matrix = np.array([
+        [cos_yaw, -sin_yaw],
+        [sin_yaw,  cos_yaw]
+    ])
+    
+    # Transform each point from local to vision frame
+    path_points_2d_vision = []
+    for point in path_points_2d_local:
+        # Rotate point to align with robot's orientation
+        rotated_point = rotation_matrix @ point
+        # Translate to robot's current position
+        vision_point = rotated_point + np.array([current_x, current_y])
+        path_points_2d_vision.append(vision_point)
+    
+    path_points_2d_vision = np.array(path_points_2d_vision)
+    
     # Add z-coordinate (keep constant height)
-    path_points = np.column_stack([path_points_2d, np.full(len(path_points_2d), start_position[2])])
+    path_points = np.column_stack([path_points_2d_vision, np.full(len(path_points_2d_vision), start_position[2])])
     
     end_position = path_points[-1]
     direction_vector = (end_position - start_position)[:2]  # 2D direction
@@ -347,6 +371,8 @@ def define_path_and_direction(spot, config, experiment_config):
     print(f'Arc path defined: {len(path_points)} points from {start_position} to {end_position}')
     print(f'Arc radius: {arc_radius:.2f}m, Angles: {np.degrees(start_angle):.1f}° to {np.degrees(end_angle):.1f}°')
     print(f'Direction: {experiment_config["task_type"]} (arc curve)')
+    print(f'Robot orientation in vision frame: {np.degrees(current_yaw):.1f}°')
+    print(f'Path points are in vision frame coordinates')
     
     return {
         'start_position': start_position,
