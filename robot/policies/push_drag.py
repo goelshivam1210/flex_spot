@@ -16,6 +16,9 @@ python push_drag.py --hostname 192.168.1.100 --experiment small_box_no_handle_1r
 python push_drag.py --hostname 192.168.1.100 --experiment small_box_no_handle_1robot --autonomous-detection
 python push_drag.py --hostname 192.168.1.100 --experiment large_box_no_handle_2robots --autonomous-detection --robot-side right
 
+Working -- command needs more steps
+policies/push_drag.py --hostname 192.168.1.101 --experiment small_box_no_handle_push --action-scale 0.35 --autonomous-detection --max-steps 8
+
 Author: Shivam Goel
 Date: September 2025
 """
@@ -25,7 +28,9 @@ import sys
 import time
 import numpy as np
 import math
-import os  
+import os
+import matplotlib.pyplot as plt
+from datetime import datetime  
 
 # Import Spot SDK modules
 from bosdyn.client.lease import LeaseKeepAlive
@@ -69,6 +74,115 @@ EXPERIMENT_CONFIGS = {
         "max_force_scale": 0.6
     }
 }
+
+
+def plot_trajectory(robot_positions, path_points, experiment_name, save_path=None):
+    """
+    Plot robot trajectory and planned path in vision frame.
+    
+    Args:
+        robot_positions: List of (x, y, yaw) tuples representing robot positions
+        path_points: Array of planned path points (Nx3 array with x, y, z)
+        experiment_name: Name of the experiment for title
+        save_path: Optional path to save the plot
+    """
+    plt.figure(figsize=(12, 10))
+    
+    # Convert robot positions to arrays
+    robot_positions = np.array(robot_positions)
+    robot_x = robot_positions[:, 0]
+    robot_y = robot_positions[:, 1]
+    robot_yaw = robot_positions[:, 2]
+    
+    # Plot planned path
+    plt.plot(path_points[:, 0], path_points[:, 1], 'b-', linewidth=2, 
+             label='Planned Path', alpha=0.7)
+    plt.scatter(path_points[0, 0], path_points[0, 1], color='green', 
+                s=100, marker='o', label='Start Point', zorder=5)
+    plt.scatter(path_points[-1, 0], path_points[-1, 1], color='red', 
+                s=100, marker='s', label='End Point', zorder=5)
+    
+    # Plot robot trajectory
+    plt.plot(robot_x, robot_y, 'r-', linewidth=2, 
+             label='Robot Trajectory', alpha=0.8)
+    plt.scatter(robot_x[0], robot_y[0], color='darkgreen', 
+                s=100, marker='^', label='Robot Start', zorder=5)
+    plt.scatter(robot_x[-1], robot_y[-1], color='darkred', 
+                s=100, marker='v', label='Robot End', zorder=5)
+    
+    # Add arrows to show robot orientation at key points
+    step_size = max(1, len(robot_x) // 10)  # Show arrows every 10% of trajectory
+    for i in range(0, len(robot_x), step_size):
+        dx = 0.1 * np.cos(robot_yaw[i])
+        dy = 0.1 * np.sin(robot_yaw[i])
+        plt.arrow(robot_x[i], robot_y[i], dx, dy, 
+                 head_width=0.05, head_length=0.05, fc='orange', ec='orange', alpha=0.7)
+    
+    plt.xlabel('X Position (meters)')
+    plt.ylabel('Y Position (meters)')
+    plt.title(f'Robot Trajectory vs Planned Path - {experiment_name}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.axis('equal')
+    
+    # Add text box with statistics
+    total_distance = np.sum(np.sqrt(np.diff(robot_x)**2 + np.diff(robot_y)**2))
+    path_length = np.sum(np.sqrt(np.diff(path_points[:, 0])**2 + np.diff(path_points[:, 1])**2))
+    final_error = np.sqrt((robot_x[-1] - path_points[-1, 0])**2 + (robot_y[-1] - path_points[-1, 1])**2)
+    
+    stats_text = f'Total Distance: {total_distance:.2f}m\n'
+    stats_text += f'Path Length: {path_length:.2f}m\n'
+    stats_text += f'Final Error: {final_error:.2f}m\n'
+    stats_text += f'Steps: {len(robot_x)}'
+    
+    plt.text(0.02, 0.98, stats_text, transform=plt.gca().transAxes, 
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to: {save_path}")
+    
+    plt.show()
+
+
+def plot_position_over_time(robot_positions, experiment_name, save_path=None):
+    """
+    Plot robot position components over time.
+    
+    Args:
+        robot_positions: List of (x, y, yaw) tuples representing robot positions
+        experiment_name: Name of the experiment for title
+        save_path: Optional path to save the plot
+    """
+    robot_positions = np.array(robot_positions)
+    time_steps = np.arange(len(robot_positions))
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+    
+    # X position
+    ax1.plot(time_steps, robot_positions[:, 0], 'b-', linewidth=2)
+    ax1.set_ylabel('X Position (m)')
+    ax1.set_title(f'Robot Position Over Time - {experiment_name}')
+    ax1.grid(True, alpha=0.3)
+    
+    # Y position
+    ax2.plot(time_steps, robot_positions[:, 1], 'g-', linewidth=2)
+    ax2.set_ylabel('Y Position (m)')
+    ax2.grid(True, alpha=0.3)
+    
+    # Yaw angle
+    ax3.plot(time_steps, np.degrees(robot_positions[:, 2]), 'r-', linewidth=2)
+    ax3.set_ylabel('Yaw Angle (degrees)')
+    ax3.set_xlabel('Time Step')
+    ax3.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Position plot saved to: {save_path}")
+    
+    plt.show()
 
 
 def user_confirm_step(step_description):
@@ -139,13 +253,15 @@ def detect_and_grasp_object(spot, config, experiment_config):
     if config.autonomous_detection:
         print('Using autonomous box detection with OWL-v2 + SAM...')
         try:
-            target_pixel = SpotPerception.find_grasp_sam(
-                color_img, depth_img, 
-                left=(config.robot_side == 'left'),
-                conf=0.15,
-                max_distance_m=3.0
-            )
-            # target_pixel = SpotPerception.get_red_object_center_of_mass(color_img)
+            if experiment_config["grasp_strategy"] == "edge_grasp":
+                target_pixel = SpotPerception.find_grasp_sam(
+                        color_img, depth_img, 
+                        left=(config.robot_side == 'left'),
+                        conf=0.15,
+                        max_distance_m=3.0
+                    )
+            else:
+                target_pixel = SpotPerception.get_red_object_center_of_mass(color_img)
             if target_pixel is None:
                 print('Autonomous detection failed, falling back to manual selection')
                 target_pixel = SpotPerception.get_target_from_user(color_img)
@@ -185,8 +301,8 @@ def detect_and_grasp_object(spot, config, experiment_config):
     return target_pixel
 
 def define_path_and_direction(spot, config, experiment_config):
-    """Define straight-line path for push/drag operation."""
-    print('Defining path for push/drag operation')
+    """Define curved arc path for push/drag operation."""
+    print('Defining curved arc path for push/drag operation')
     
     # Get current hand position as start point
     robot_state = spot._client._state_client.get_robot_state()
@@ -196,40 +312,72 @@ def define_path_and_direction(spot, config, experiment_config):
     if vision_T_hand is None:
         raise Exception("Could not get hand pose for path definition")
     
-    start_position = np.array([vision_T_hand.x, vision_T_hand.y, vision_T_hand.z])
-    
-    # Get current robot orientation to define forward direction
+    # Get robot pose in vision frame
     current_x, current_y, current_yaw = spot.get_current_pose()
     
-    # Define path direction based on experiment type and robot orientation
+    # Use robot position as start position (not hand position) for path planning
+    # This ensures the path is relative to the robot's base, not the hand
+    start_position = np.array([current_x, current_y, vision_T_hand.z])
+    
+    # Define arc parameters based on target distance
+    arc_radius = config.target_distance  # Use target distance as radius
+    
     if experiment_config["task_type"] == "push":
-        # Push: move forward relative to robot
-        direction_vector = np.array([
-            math.cos(current_yaw),
-            math.sin(current_yaw), 
-            0.0
-        ])
+        # Push: forward arc curving right
+        # start_angle = -np.pi/6  # -30 degrees
+        start_angle = -np.pi/4
+        start_angle = 0 
+        # end_angle = np.pi/6     # +30 degrees
+        end_angle = np.pi/3 
     else:  # drag
-        # Drag: move backward relative to robot
-        direction_vector = np.array([
-            -math.cos(current_yaw),
-            -math.sin(current_yaw),
-            0.0
-        ])
+        # Drag: backward arc curving left  
+        start_angle = np.pi - np.pi/6   # 150 degrees
+        end_angle = np.pi + np.pi/6     # 210 degrees
     
-    # Define target end position
-    target_distance = config.target_distance
-    end_position = start_position + (direction_vector * target_distance)
-    
-    # Use InteractivePerception to generate path points
+    # Generate arc path points in local coordinate system
     interactive_perception = InteractivePerception()
-    path_points = interactive_perception.generate_straight_line_path(
-        start_position, end_position, num_points=max(10, int(target_distance * 20))
+    path_points_2d_local = interactive_perception.generate_arc_path(
+        center=np.array([0, 0]),  # Generate arc centered at origin
+        radius=arc_radius,
+        start_angle=start_angle,
+        end_angle=end_angle,
+        num_points=max(10, int(config.target_distance * 20))
     )
     
-    print(f'Path defined: {len(path_points)} points from {start_position} to {end_position}')
-    print(f'Total distance: {target_distance:.2f}m')
-    print(f'Direction: {experiment_config["task_type"]} ({direction_vector[:2]})')
+    # Transform arc points to vision frame
+    # Account for robot's current orientation in vision frame
+    cos_yaw = np.cos(current_yaw)
+    sin_yaw = np.sin(current_yaw)
+    
+    # Rotation matrix to transform from local to vision frame
+    rotation_matrix = np.array([
+        [cos_yaw, -sin_yaw],
+        [sin_yaw,  cos_yaw]
+    ])
+    
+    # Transform each point from local to vision frame
+    path_points_2d_vision = []
+    for point in path_points_2d_local:
+        # Rotate point to align with robot's orientation
+        rotated_point = rotation_matrix @ point
+        # Translate to robot's current position
+        vision_point = rotated_point + np.array([current_x, current_y])
+        path_points_2d_vision.append(vision_point)
+    
+    path_points_2d_vision = np.array(path_points_2d_vision)
+    
+    # Add z-coordinate (keep constant height)
+    path_points = np.column_stack([path_points_2d_vision, np.full(len(path_points_2d_vision), start_position[2])])
+    
+    end_position = path_points[-1]
+    direction_vector = (end_position - start_position)[:2]  # 2D direction
+    direction_vector = direction_vector / np.linalg.norm(direction_vector)
+    
+    print(f'Arc path defined: {len(path_points)} points from {start_position} to {end_position}')
+    print(f'Arc radius: {arc_radius:.2f}m, Angles: {np.degrees(start_angle):.1f}° to {np.degrees(end_angle):.1f}°')
+    print(f'Direction: {experiment_config["task_type"]} (arc curve)')
+    print(f'Robot orientation in vision frame: {np.degrees(current_yaw):.1f}°')
+    print(f'Path points are in vision frame coordinates')
     
     return {
         'start_position': start_position,
@@ -255,6 +403,9 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     path_points = path_info['path_points']
     start_position = path_info['start_position']
     
+    # Initialize position tracking
+    box_positions = []
+    
     print(f"Starting path-following execution")
     print(f"Max steps: {config.max_steps}, Action scale: {config.action_scale}")
     
@@ -272,6 +423,19 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         # Get current robot orientation
         current_x, current_y, current_yaw = spot.get_current_pose()
         
+
+        
+        # estimate the box center from grasp
+        box_center = interactive_perception.estimate_box_center_from_grasp(
+            current_hand_pos, 
+            experiment_config["grasp_strategy"], 
+            box_dimensions={"width": 0.6, "depth": 0.4, "height": 0.8}, 
+            current_yaw=current_yaw
+        )
+
+        # Track robot position in vision frame
+        box_positions.append((box_center[0], box_center[1], current_yaw))
+
         # Construct state vector for path-following policy
         state_vector = interactive_perception.construct_path_following_state(
             current_hand_pos, path_points, current_yaw, closest_path_idx
@@ -291,21 +455,42 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         
         # Execute movement based on task type
         try:
-            if experiment_config["task_type"] == "push":
+            if experiment_config["task_type"] == "push":                
+                # For pushing: move robot body while maintaining arm position
                 print('Pushing object by moving robot...')
-                target_position = current_hand_pos - scaled_action[:3]  # Note the minus sign
-                target_pose = SE3Pose(
-                    x=target_position[0],
-                    y=target_position[1], 
-                    z=target_position[2],
-                    rot=current_hand_pose.rot
+                dx = scaled_action[0]
+                dy = scaled_action[1]
+                d_yaw = scaled_action[2] if len(scaled_action) > 2 else 0
+                # d_yaw = 0
+                dt = 2
+                vx = abs(dx/dt)
+                vy = abs(dy/dt)
+                v_yaw = abs(d_yaw/dt)
+
+                spot.push_object_from_sim(
+                    dx=dx, 
+                    dy=dy, 
+                    d_yaw=d_yaw,
+                    vx=vx,
+                    vy=vy,
+                    v_yaw=v_yaw,
+                    dt=2.0
                 )
+
+                # print('Pushing object by moving robot...')
+                # target_position = current_hand_pos - scaled_action[:3]  # Note the minus sign
+                # target_pose = SE3Pose(
+                #     x=target_position[0],
+                #     y=target_position[1], 
+                #     z=target_position[2],
+                #     rot=current_hand_pose.rot
+                # )
                 
-                arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
-                    target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
-                )
-                cmd_id = spot._client._command_client.robot_command(arm_cmd)
-                block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
+                # arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
+                #     target_pose.to_proto(), VISION_FRAME_NAME, seconds=2.0
+                # )
+                # cmd_id = spot._client._command_client.robot_command(arm_cmd)
+                # block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
                 # For pushing: move robot body while maintaining arm position
             else:  # drag
                 # For dragging: move arm to pull object
@@ -325,7 +510,7 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
                 block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
             
             # Update closest path index for state computation
-            closest_path_idx = interactive_perception.update_closest_path_index(current_hand_pos, path_points, closest_path_idx)
+            closest_path_idx = interactive_perception.update_closest_path_index(box_center, path_points, closest_path_idx)
             
             # Check success
             if check_path_following_success(current_hand_pos, path_info, config.success_distance):
@@ -339,6 +524,28 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     
     print(f"Policy execution completed. Success: {manipulation_success}")
     time.sleep(2)  # Hold position to observe
+    
+    # Generate plots (unless disabled)
+    if not hasattr(config, 'no_plots') or not config.no_plots:
+        print("Generating trajectory plots...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        experiment_name = f"{config.experiment}_{timestamp}"
+        
+        # Create plots directory if it doesn't exist
+        plots_dir = "plots"
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Plot trajectory comparison
+        trajectory_plot_path = os.path.join(plots_dir, f"trajectory_{experiment_name}.png")
+        plot_trajectory(box_positions, path_points, experiment_name, trajectory_plot_path)
+        
+        # Plot position over time
+        position_plot_path = os.path.join(plots_dir, f"position_over_time_{experiment_name}.png")
+        plot_position_over_time(box_positions, experiment_name, position_plot_path)
+        
+        print(f"Plots saved to {plots_dir}/ directory")
+    else:
+        print("Plotting disabled by user")
     
     return manipulation_success
 
@@ -465,6 +672,8 @@ def main():
                         help='Use autonomous box detection instead of manual selection')
     parser.add_argument('--robot-side', choices=['left', 'right'], default='left',
                         help='Robot side for multi-robot coordination (affects grasp point selection)')
+    parser.add_argument('--no-plots', action='store_true',
+                        help='Disable trajectory plotting')
     
     options = parser.parse_args()
     
@@ -482,13 +691,3 @@ if __name__ == '__main__':
 
 
 
-                #     if experiment_config["task_type"] == "push":
-                
-                # # For pushing: move robot body while maintaining arm position
-                # print('Pushing object by moving robot...')
-                # spot.push_object(
-                #     dx=-scaled_action[0], 
-                #     dy=-scaled_action[1], 
-                #     d_yaw=scaled_action[2] if len(scaled_action) > 2 else 0,
-                #     dt=2.0
-                # )

@@ -166,7 +166,131 @@ class InteractivePerception:
         
         return state.astype(np.float32)
     
-    def construct_path_following_state(self, current_pos, path_points, current_yaw, closest_idx):
+    def estimate_box_center_from_grasp(self, gripper_pos, grasp_strategy, box_dimensions, current_yaw):
+        """
+        Estimate box center position from gripper position and grasp type.
+        
+        Box coordinate system:
+        - Height: vertical dimension (how tall)
+        - Width: horizontal dimension (left-to-right when facing box)  
+        - Depth: front-to-back dimension (how deep)
+        
+        Handle specifications:
+        - Located on front face of box
+        - 48cm from top, 30cm from each side edge
+        - Centered horizontally and vertically accessible
+        
+        Edge grasp specifications:
+        - Usually left edge for single robot
+        - Around 45cm mark from top/bottom (roughly middle height)
+        
+        Args:
+            gripper_pos: Current gripper position [x, y, z]
+            grasp_strategy: "edge_grasp", "handle_grasp", "dual_edge_grasp", "dual_handle_grasp"
+            box_dimensions: {"width": 0.6, "depth": 0.4, "height": 0.3} (meters)
+            current_yaw: Robot orientation (radians)
+            
+        Returns:
+            np.array: Estimated box center position [x, y, z]
+        """
+        
+        if grasp_strategy == "handle_grasp":
+            # Handle is on front face, centered horizontally
+            # Gripper is at handle position on front surface
+            # Box center is half-depth behind the front face
+            
+            # Calculate offset from handle to box center
+            offset_distance = box_dimensions["depth"] / 2  # Half box depth inward
+            
+            # Offset in robot's forward direction (behind the front face)
+            offset_x = offset_distance * math.cos(current_yaw)
+            offset_y = offset_distance * math.sin(current_yaw)
+            
+            # Handle is 48cm from top, so adjust Z to box center
+            # If handle is 0.48m from top, and box height is H, 
+            # then handle is at (H - 0.48) from bottom
+            # Box center is at H/2 from bottom
+            # So offset = H/2 - (H - 0.48) = 0.48 - H/2
+            handle_height_from_bottom = box_dimensions["height"] - 0.48  # 48cm from top
+            box_center_height = box_dimensions["height"] / 2
+            offset_z = box_center_height - handle_height_from_bottom
+            
+            box_center = gripper_pos + np.array([offset_x, offset_y, offset_z])
+            
+        elif grasp_strategy == "edge_grasp":
+            # Single robot grasping left edge at ~45cm mark
+            # Gripper is on the left side face of the box
+            
+            # Box center is half-width to the right of left edge
+            # and half-depth inward from the side
+            
+            # Calculate offset from left edge to center
+            # Assuming robot approaches from the left side
+            offset_width = box_dimensions["width"] / 2  # Half width rightward
+            offset_depth = 0  # Edge grasp is on the side, not front/back
+            
+            # Calculate offsets in world coordinates
+            # Robot's right direction is perpendicular to forward direction
+            right_x = -math.sin(current_yaw)  # Perpendicular to forward
+            right_y = math.cos(current_yaw)
+            
+            offset_x = offset_width * right_x
+            offset_y = offset_width * right_y
+            
+            # Height adjustment: if grasping at 45cm mark, adjust to center
+            # Assuming 45cm is from bottom
+            grasp_height_from_bottom = 0.45  # 45cm mark
+            box_center_height = box_dimensions["height"] / 2
+            offset_z = box_center_height - grasp_height_from_bottom
+            
+            box_center = gripper_pos + np.array([offset_x, offset_y, offset_z])
+            
+        elif grasp_strategy == "dual_edge_grasp":
+            # Two robots grasping opposite edges
+            # Assume gripper is on edge, box center is at geometric center
+            
+            # For dual robot, assume robots are on opposite sides
+            # Box center is simply at the midpoint between the two grasps
+            # Since we only have one gripper position, estimate based on edge
+            
+            # Similar to edge_grasp but might need robot ID to determine which side
+            # For now, assume similar to single edge grasp
+            offset_width = box_dimensions["width"] / 2
+            
+            right_x = -math.sin(current_yaw)
+            right_y = math.cos(current_yaw)
+            
+            offset_x = offset_width * right_x  
+            offset_y = offset_width * right_y
+            
+            grasp_height_from_bottom = 0.45
+            box_center_height = box_dimensions["height"] / 2
+            offset_z = box_center_height - grasp_height_from_bottom
+            
+            box_center = gripper_pos + np.array([offset_x, offset_y, offset_z])
+            
+        elif grasp_strategy == "dual_handle_grasp":
+            # Two robots grasping handles (if box has multiple handles)
+            # Similar to single handle grasp
+            offset_distance = box_dimensions["depth"] / 2
+            
+            offset_x = offset_distance * math.cos(current_yaw)
+            offset_y = offset_distance * math.sin(current_yaw)
+            
+            handle_height_from_bottom = box_dimensions["height"] - 0.48
+            box_center_height = box_dimensions["height"] / 2
+            offset_z = box_center_height - handle_height_from_bottom
+            
+            box_center = gripper_pos + np.array([offset_x, offset_y, offset_z])
+            
+        else:
+            # Fallback: assume gripper position is box center
+            box_center = gripper_pos
+        
+        return box_center
+    
+    def construct_path_following_state(self, current_pos, path_points, current_yaw, closest_idx, 
+                                       grasp_strategy="edge_grasp", box_dimensions = None):
         """
         Construct 8D state vector for path-following policy.
         
@@ -181,6 +305,11 @@ class InteractivePerception:
                                     progress, deviation, speed_along_path, box_forward_x, box_forward_y]
         """
         
+        if box_dimensions is None:
+            box_dimensions = {"width": 0.4, "depth": 0.4, "height": 0.2}
+
+        box_center  = self.estimate_box_center_from_grasp(
+            current_pos, grasp_strategy, box_dimensions, current_yaw)
         # Find closest point on path
         closest_point = path_points[closest_idx]
         
@@ -210,7 +339,7 @@ class InteractivePerception:
         path_normal = np.array([-path_tangent[1], path_tangent[0], 0.0])
         
         # Calculate position error relative to path
-        position_error = current_pos - closest_point
+        position_error = box_center - closest_point
         
         # Project error onto path-relative coordinates
         lateral_error = np.dot(position_error, path_normal)
@@ -303,3 +432,78 @@ class InteractivePerception:
             path_points.append(point)
         
         return np.array(path_points) 
+    
+    def generate_arc_path(self, center, radius, start_angle, end_angle, num_points=50):
+        """Generate curved arc path matching simulation training."""
+        points = []
+        for theta in np.linspace(start_angle, end_angle, num_points):
+            x = center[0] + radius * np.cos(theta)
+            y = center[1] + radius * np.sin(theta)
+            points.append([x, y])
+        return np.array(points)
+    
+    def decompose_wrench_to_contact_forces(self, wrench, box_dimensions=None, max_force=400.0):
+        """
+        Decompose a centralized wrench into two contact forces for dual robot manipulation.
+        
+        Args:
+            wrench: [Fx, Fy, τz] - desired wrench on box center
+            box_dimensions: Box dimensions dict (uses width for contact spacing)
+            max_force: Maximum force per contact point
+            
+        Returns:
+            np.array: Contact forces [2x3] for [left_robot, right_robot]
+        """
+        if box_dimensions is None:
+            box_dimensions = {"width": 0.4, "depth": 0.4, "height": 0.2}
+        
+        Fx, Fy, tau_z = wrench[0], wrench[1], wrench[2]
+        
+        # Define contact points (left and right sides of box)
+        offset_x = -0.2  # Behind box center
+        offset_y = box_dimensions["width"] / 2  # Half box width
+        contact_points = np.array([
+            [offset_x, +offset_y, 0.0],  # Left robot contact
+            [offset_x, -offset_y, 0.0]   # Right robot contact  
+        ])
+        
+        # Cap the torque based on maximum achievable with contact geometry
+        torque_cap = 2 * max_force * abs(offset_y)
+        tau_z = np.clip(tau_z, -torque_cap, torque_cap)
+        
+        # Build equilibrium matrix A for force balance
+        # A * [f1x, f1y, f2x, f2y]^T = [Fx, Fy, τz]^T
+        A = np.zeros((3, 4))
+        
+        # Force balance equations: f1x + f2x = Fx, f1y + f2y = Fy
+        A[0, 0] = 1.0  # f1x coefficient
+        A[0, 2] = 1.0  # f2x coefficient
+        A[1, 1] = 1.0  # f1y coefficient  
+        A[1, 3] = 1.0  # f2y coefficient
+        
+        # Moment balance: τz = r1x*f1y - r1y*f1x + r2x*f2y - r2y*f2x
+        r1 = contact_points[0]  # [offset_x, +offset_y, 0]
+        r2 = contact_points[1]  # [offset_x, -offset_y, 0]
+        
+        A[2, 0] = -r1[1]  # -r1y * f1x
+        A[2, 1] = +r1[0]  # +r1x * f1y
+        A[2, 2] = -r2[1]  # -r2y * f2x  
+        A[2, 3] = +r2[0]  # +r2x * f2y
+        
+        # Solve using pseudo-inverse
+        wrench_vector = np.array([Fx, Fy, tau_z])
+        forces_flat = np.linalg.pinv(A) @ wrench_vector
+        
+        # Reshape to contact forces [2x2] then pad to [2x3]
+        contact_forces_2d = forces_flat.reshape(2, 2)
+        contact_forces = np.zeros((2, 3))
+        contact_forces[:, :2] = contact_forces_2d  # x,y forces
+        contact_forces[:, 2] = 0  # z forces are zero
+        
+        # Apply force limits per contact
+        for i in range(2):
+            force_mag = np.linalg.norm(contact_forces[i])
+            if force_mag > max_force:
+                contact_forces[i] *= max_force / force_mag
+        
+        return contact_forces
