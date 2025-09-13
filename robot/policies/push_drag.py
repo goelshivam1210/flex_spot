@@ -16,6 +16,9 @@ python push_drag.py --hostname 192.168.1.100 --experiment small_box_no_handle_1r
 python push_drag.py --hostname 192.168.1.100 --experiment small_box_no_handle_1robot --autonomous-detection
 python push_drag.py --hostname 192.168.1.100 --experiment large_box_no_handle_2robots --autonomous-detection --robot-side right
 
+Working -- command needs more steps
+policies/push_drag.py --hostname 192.168.1.101 --experiment small_box_no_handle_push --action-scale 0.35 --autonomous-detection --max-steps 8
+
 Author: Shivam Goel
 Date: September 2025
 """
@@ -401,7 +404,7 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     start_position = path_info['start_position']
     
     # Initialize position tracking
-    robot_positions = []
+    box_positions = []
     
     print(f"Starting path-following execution")
     print(f"Max steps: {config.max_steps}, Action scale: {config.action_scale}")
@@ -420,8 +423,7 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         # Get current robot orientation
         current_x, current_y, current_yaw = spot.get_current_pose()
         
-        # Track robot position in vision frame
-        robot_positions.append((current_x, current_y, current_yaw))
+
         
         # estimate the box center from grasp
         box_center = interactive_perception.estimate_box_center_from_grasp(
@@ -430,6 +432,9 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
             box_dimensions={"width": 0.6, "depth": 0.4, "height": 0.8}, 
             current_yaw=current_yaw
         )
+
+        # Track robot position in vision frame
+        box_positions.append((box_center[0], box_center[1], current_yaw))
 
         # Construct state vector for path-following policy
         state_vector = interactive_perception.construct_path_following_state(
@@ -532,11 +537,11 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         
         # Plot trajectory comparison
         trajectory_plot_path = os.path.join(plots_dir, f"trajectory_{experiment_name}.png")
-        plot_trajectory(robot_positions, path_points, experiment_name, trajectory_plot_path)
+        plot_trajectory(box_positions, path_points, experiment_name, trajectory_plot_path)
         
         # Plot position over time
         position_plot_path = os.path.join(plots_dir, f"position_over_time_{experiment_name}.png")
-        plot_position_over_time(robot_positions, experiment_name, position_plot_path)
+        plot_position_over_time(box_positions, experiment_name, position_plot_path)
         
         print(f"Plots saved to {plots_dir}/ directory")
     else:
