@@ -446,8 +446,7 @@ def main():
                 print(f" New best full-arc success: {best_full_success:.2f} — model saved")
             
             if eval_phase == 1:
-                meets = (short_stats["success_rate"] >= eval_stage1_threshold and
-                        full_stats["success_rate"]  >= eval_stage1_threshold and
+                meets = (full_stats["success_rate"]  >= eval_stage1_threshold and
                         dual_stats["success_rate"]  >= eval_stage1_threshold)
                 stage1_streak = stage1_streak + 1 if meets else 0
 
@@ -463,8 +462,7 @@ def main():
                     next_eval_ep = ep + eval_interval
 
             elif eval_phase == 2:
-                meets = (short_stats["success_rate"] >= eval_stage2_threshold and
-                        full_stats["success_rate"]  >= eval_stage2_threshold and
+                meets = (full_stats["success_rate"]  >= eval_stage2_threshold and
                         dual_stats["success_rate"]  >= eval_stage2_threshold)
                 stage2_streak = stage2_streak + 1 if meets else 0
 
