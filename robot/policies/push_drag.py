@@ -314,6 +314,9 @@ def define_path_and_direction(spot, config, experiment_config):
     # This ensures the path is relative to the robot's base, not the hand
     start_position = np.array([current_x, current_y, vision_T_hand.z])
     
+    # Store the initial pose for consistent transformations
+    initial_pose = (current_x, current_y, current_yaw)
+    
     # Define arc parameters based on target distance
     arc_radius = config.target_distance  # Use target distance as radius
     
@@ -378,7 +381,8 @@ def define_path_and_direction(spot, config, experiment_config):
         'start_position': start_position,
         'end_position': end_position,
         'path_points': path_points,
-        'direction_vector': direction_vector
+        'direction_vector': direction_vector,
+        'initial_pose': initial_pose
     }
 
 def execute_path_following_policy(spot, config, experiment_config, path_info):
@@ -400,6 +404,20 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     
     # Initialize position tracking
     robot_positions = []
+    
+    # Get initial robot pose for consistent coordinate transformations
+    initial_robot_pose = path_info['initial_pose']
+    print(f"Initial robot pose: ({initial_robot_pose[0]:.3f}, {initial_robot_pose[1]:.3f}, {np.degrees(initial_robot_pose[2]):.1f}°)")
+    print(f"Path start position: ({start_position[0]:.3f}, {start_position[1]:.3f}, {start_position[2]:.3f})")
+    
+    # Verify that robot and path start at the same position
+    robot_start_2d = np.array([initial_robot_pose[0], initial_robot_pose[1]])
+    path_start_2d = np.array([start_position[0], start_position[1]])
+    start_error = np.linalg.norm(robot_start_2d - path_start_2d)
+    print(f"Start position error: {start_error:.6f}m (should be ~0)")
+    
+    if start_error > 0.01:
+        print("⚠️  WARNING: Robot and path start positions don't match!")
     
     print(f"Starting path-following execution")
     print(f"Max steps: {config.max_steps}, Action scale: {config.action_scale}")
@@ -467,7 +485,8 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
                     vx=vx,
                     vy=vy,
                     v_yaw=v_yaw,
-                    dt=2.0
+                    dt=2.0,
+                    initial_pose=initial_robot_pose
                 )
 
                 # print('Pushing object by moving robot...')
