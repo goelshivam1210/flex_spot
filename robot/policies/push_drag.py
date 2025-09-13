@@ -16,9 +16,6 @@ python push_drag.py --hostname 192.168.1.100 --experiment small_box_no_handle_1r
 python push_drag.py --hostname 192.168.1.100 --experiment small_box_no_handle_1robot --autonomous-detection
 python push_drag.py --hostname 192.168.1.100 --experiment large_box_no_handle_2robots --autonomous-detection --robot-side right
 
-Working -- command needs more steps
-policies/push_drag.py --hostname 192.168.1.101 --experiment small_box_no_handle_push --action-scale 0.35 --autonomous-detection --max-steps 8
-
 Author: Shivam Goel
 Date: September 2025
 """
@@ -142,7 +139,7 @@ def plot_trajectory(robot_positions, path_points, experiment_name, save_path=Non
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved to: {save_path}")
     
-    plt.show()
+    # plt.show()
 
 
 def plot_position_over_time(robot_positions, experiment_name, save_path=None):
@@ -182,7 +179,7 @@ def plot_position_over_time(robot_positions, experiment_name, save_path=None):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Position plot saved to: {save_path}")
     
-    plt.show()
+    # plt.show()
 
 
 def user_confirm_step(step_description):
@@ -314,6 +311,9 @@ def define_path_and_direction(spot, config, experiment_config):
     
     # Get robot pose in vision frame
     current_x, current_y, current_yaw = spot.get_current_pose()
+
+    current_x = vision_T_hand.x
+    current_y = vision_T_hand.y
     
     # Use robot position as start position (not hand position) for path planning
     # This ensures the path is relative to the robot's base, not the hand
@@ -325,10 +325,10 @@ def define_path_and_direction(spot, config, experiment_config):
     if experiment_config["task_type"] == "push":
         # Push: forward arc curving right
         # start_angle = -np.pi/6  # -30 degrees
-        start_angle = -np.pi/4
+        # start_angle = -np.pi/4
         start_angle = 0 
         # end_angle = np.pi/6     # +30 degrees
-        end_angle = np.pi/3 
+        end_angle = np.pi/3
     else:  # drag
         # Drag: backward arc curving left  
         start_angle = np.pi - np.pi/6   # 150 degrees
@@ -350,19 +350,30 @@ def define_path_and_direction(spot, config, experiment_config):
     sin_yaw = np.sin(current_yaw)
     
     # Rotation matrix to transform from local to vision frame
-    rotation_matrix = np.array([
-        [cos_yaw, -sin_yaw],
-        [sin_yaw,  cos_yaw]
+    # rotation_matrix = np.array([
+    #     [cos_yaw, -sin_yaw],
+    #     [sin_yaw,  cos_yaw]
+    # ])
+
+    translation_matrix = np.array([
+        [cos_yaw, -sin_yaw, current_x],
+        [sin_yaw,  cos_yaw, current_y],
+        [0,        0,       1     ]
     ])
     
     # Transform each point from local to vision frame
     path_points_2d_vision = []
+    path_points_2d_local -= path_points_2d_local[0]
     for point in path_points_2d_local:
+        print(f'Local point: {point}')
         # Rotate point to align with robot's orientation
-        rotated_point = rotation_matrix @ point
+        # rotated_point = rotation_matrix @ point
+        translated_point = translation_matrix @ np.array([point[0], point[1], 1])
+        print(f'Translated point in vision frame: {translated_point}')
         # Translate to robot's current position
-        vision_point = rotated_point + np.array([current_x, current_y])
-        path_points_2d_vision.append(vision_point)
+        # vision_point = rotated_point + np.array([current_x, current_y])
+        # Only take the first two coordinates (x, y) from the transformed point
+        path_points_2d_vision.append(translated_point[:2])
     
     path_points_2d_vision = np.array(path_points_2d_vision)
     
@@ -404,11 +415,8 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     start_position = path_info['start_position']
     
     # Initialize position tracking
-    box_positions = []
-
-    # velocity tracking:
-    prev_box_center = None
-    prev_step_time = None
+    robot_positions = []
+    # box_centers = []
     
     print(f"Starting path-following execution")
     print(f"Max steps: {config.max_steps}, Action scale: {config.action_scale}")
@@ -427,52 +435,34 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         # Get current robot orientation
         current_x, current_y, current_yaw = spot.get_current_pose()
         
+        # Track robot position in vision frame
+        # robot_positions.append((current_x, current_y, current_yaw))
+        robot_positions.append((current_hand_pos[0], current_hand_pos[1], current_yaw))
 
         
         # estimate the box center from grasp
-        box_center = interactive_perception.estimate_box_center_from_grasp(
-            current_hand_pos, 
-            experiment_config["grasp_strategy"], 
-            box_dimensions={"width": 0.6, "depth": 0.4, "height": 0.8}, 
-            current_yaw=current_yaw
-        )
-
-        # Calculate velocity for state construction
-        current_step_time = time.time()
-        if step == 0:
-            speed_along_path = 0.0
-            prev_box_center = box_center.copy()
-            prev_step_time = current_step_time
-        else:
-            dt = current_step_time - prev_step_time
-            if dt > 0:
-                displacement = box_center[:2] - prev_box_center[:2]
-                velocity_2d = displacement / dt
-                # We'll pass this to construct_path_following_state
-            else:
-                velocity_2d = np.array([0.0, 0.0])
-            
-            prev_box_center = box_center.copy()
-            prev_step_time = current_step_time
-
-        # Track robot position in vision frame
-        box_positions.append((box_center[0], box_center[1], current_yaw))
-
-        # Construct state vector for path-following policy
-        # state_vector = interactive_perception.construct_path_following_state(
-            # current_hand_pos, path_points, current_yaw, closest_path_idx
+        # box_center = interactive_perception.estimate_box_center_from_grasp(
+        #     current_hand_pos, 
+        #     experiment_config["grasp_strategy"], 
+        #     box_dimensions={"width": 0.6, "depth": 0.4, "height": 0.8}, 
+        #     current_yaw=current_yaw
         # )
-        
+        # box_centers.append(box_center)
+
         # Construct state vector for path-following policy
-        if step == 0:
-            state_vector = interactive_perception.construct_path_following_state(
-                box_center, path_points, current_yaw, closest_path_idx
-            )
-        else:
-            # do velocity tracking for later steps
-            state_vector = interactive_perception.construct_path_following_state(
-                box_center, path_points, current_yaw, closest_path_idx, velocity_2d=velocity_2d
-            )
+        state_vector = interactive_perception.construct_path_following_state(
+            current_hand_pos, path_points, current_yaw, closest_path_idx
+        )        
+        # Construct state vector for path-following policy
+        # if step == 0:
+        #     state_vector = interactive_perception.construct_path_following_state(
+        #         box_center, path_points, current_yaw, closest_path_idx
+        #     )
+        # else:
+        #     # do velocity tracking for later steps
+        #     state_vector = interactive_perception.construct_path_following_state(
+        #         box_center, path_points, current_yaw, closest_path_idx, velocity_2d=velocity_2d
+        #     )
         # Get action from policy
         action = policy.select_action(state_vector)
         if len(action.shape) > 1:
@@ -542,10 +532,10 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
                 block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
             
             # Update closest path index for state computation
-            closest_path_idx = interactive_perception.update_closest_path_index(box_center, path_points, closest_path_idx)
+            closest_path_idx = interactive_perception.update_closest_path_index(current_hand_pos, path_points, closest_path_idx)
             
             # Check success
-            if check_path_following_success(box_center, path_info, config.success_distance):
+            if check_path_following_success(current_hand_pos, path_info, config.success_distance):
                 print(f"Path following completed successfully in {step+1} steps!")
                 manipulation_success = True
                 break
@@ -569,11 +559,11 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         
         # Plot trajectory comparison
         trajectory_plot_path = os.path.join(plots_dir, f"trajectory_{experiment_name}.png")
-        plot_trajectory(box_positions, path_points, experiment_name, trajectory_plot_path)
+        plot_trajectory(robot_positions, path_points, experiment_name, trajectory_plot_path)
         
         # Plot position over time
         position_plot_path = os.path.join(plots_dir, f"position_over_time_{experiment_name}.png")
-        plot_position_over_time(box_positions, experiment_name, position_plot_path)
+        plot_position_over_time(robot_positions, experiment_name, position_plot_path)
         
         print(f"Plots saved to {plots_dir}/ directory")
     else:
@@ -617,14 +607,14 @@ def push_drag_main(config):
             saved_yaw = spot.save_initial_yaw()
             
             #  1: Object detection and grasp
-            step_result = user_confirm_step("Detect and grasp target object")
+            step_result = True #user_confirm_step("Detect and grasp target object")
             if step_result == False:
                 return cleanup_and_exit(spot, config.dock_id)
             elif step_result != 'skip':
                 detect_and_grasp_object(spot, config, experiment_config)
             
             #  2: Path definition
-            step_result = user_confirm_step("Define push/drag path")
+            # step_result = user_confirm_step("Define push/drag path")
             if step_result == False:
                 return cleanup_and_exit(spot, config.dock_id)
             elif step_result != 'skip':
@@ -634,7 +624,7 @@ def push_drag_main(config):
                 path_info = {'start_position': np.array([0,0,0]), 'end_position': np.array([1,0,0])}
             
             #  3: Policy execution
-            step_result = user_confirm_step("Execute path-following policy")
+            # step_result = user_confirm_step("Execute path-following policy")
             if step_result == False:
                 return cleanup_and_exit(spot, config.dock_id)
             elif step_result != 'skip':
@@ -643,7 +633,7 @@ def push_drag_main(config):
                 policy_success = True
             
             #  4: Cleanup
-            step_result = user_confirm_step("Release object and dock")
+            # step_result = user_confirm_step("Release object and dock")
             if step_result == False:
                 return cleanup_and_exit(spot, config.dock_id)
             cleanup_and_exit(spot, config.dock_id)

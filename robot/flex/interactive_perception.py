@@ -227,8 +227,21 @@ class InteractivePerception:
             # Calculate offset from left edge to center
             # Assuming robot approaches from the left side
             offset_width = box_dimensions["width"] / 2  # Half width rightward
-            offset_depth = 0  # Edge grasp is on the side, not front/back
+            offset_depth = box_dimensions["depth"] / 2   # Edge grasp is on the side, not front/back
+
+            # Transform arc points to vision frame
+            # Account for robot's current orientation in vision frame
+            cos_yaw = np.cos(current_yaw)
+            sin_yaw = np.sin(current_yaw)
             
+            # Rotation matrix to transform from local to vision frame
+            rotation_matrix = np.array([
+                [cos_yaw, -sin_yaw],
+                [sin_yaw,  cos_yaw]
+            ])
+            point = np.array([offset_depth, offset_width])  # Local coordinates
+            transformed_offset = rotation_matrix @ point
+      
             # Calculate offsets in world coordinates
             # Robot's right direction is perpendicular to forward direction
             right_x = -math.sin(current_yaw)  # Perpendicular to forward
@@ -243,7 +256,8 @@ class InteractivePerception:
             box_center_height = box_dimensions["height"] / 2
             offset_z = box_center_height - grasp_height_from_bottom
             
-            box_center = gripper_pos + np.array([offset_x, offset_y, offset_z])
+            # box_center = gripper_pos + np.array([offset_x, offset_y, offset_z])
+            box_center = gripper_pos + np.array([transformed_offset[0], transformed_offset[1], 0.0])
             
         elif grasp_strategy == "dual_edge_grasp":
             # Two robots grasping opposite edges
@@ -305,11 +319,11 @@ class InteractivePerception:
                                     progress, deviation, speed_along_path, box_forward_x, box_forward_y]
         """
         
-        if box_dimensions is None:
-            box_dimensions = {"width": 0.4, "depth": 0.4, "height": 0.2}
+        # if box_dimensions is None:
+        #     box_dimensions = {"width": 0.4, "depth": 0.4, "height": 0.2}
 
-        box_center  = self.estimate_box_center_from_grasp(
-            current_pos, grasp_strategy, box_dimensions, current_yaw)
+        # box_center  = self.estimate_box_center_from_grasp(
+        #     current_pos, grasp_strategy, box_dimensions, current_yaw)
         # Find closest point on path
         closest_point = path_points[closest_idx]
         
@@ -339,7 +353,7 @@ class InteractivePerception:
         path_normal = np.array([-path_tangent[1], path_tangent[0], 0.0])
         
         # Calculate position error relative to path
-        position_error = box_center - closest_point
+        position_error = current_pos - closest_point
         
         # Project error onto path-relative coordinates
         lateral_error = np.dot(position_error, path_normal)
