@@ -297,7 +297,7 @@ def detect_and_grasp_object(spot, config, experiment_config):
     
     return target_pixel
 
-def define_path_and_direction(spot, config, experiment_config):
+def define_path_and_direction(spot, config, experiment_config, saved_yaw):
     """Define curved arc path for push/drag operation."""
     print('Defining curved arc path for push/drag operation')
     
@@ -310,7 +310,7 @@ def define_path_and_direction(spot, config, experiment_config):
         raise Exception("Could not get hand pose for path definition")
     
     # Get robot pose in vision frame
-    current_x, current_y, current_yaw = spot.get_current_pose()
+    current_x, current_y, _ = spot.get_current_pose()
 
     current_x = vision_T_hand.x
     current_y = vision_T_hand.y
@@ -324,16 +324,16 @@ def define_path_and_direction(spot, config, experiment_config):
     
     if experiment_config["task_type"] == "push":
         # Push: forward arc curving right
-        # start_angle = -np.pi/6  # -30 degrees
-        # start_angle = -np.pi/4
-        start_angle = 0 
-        # end_angle = np.pi/6     # +30 degrees
-        end_angle = np.pi/3
+        start_angle = 0  # -30 degrees
+        # Use arc angle from command line parameter
+        end_angle = np.radians(config.arc_angle) + start_angle
     else:  # drag
         # Drag: backward arc curving left  
-        start_angle = np.pi - np.pi/6   # 150 degrees
-        end_angle = np.pi + np.pi/6     # 210 degrees
-    
+        # start_angle = np.pi - np.pi/6   # 150 degrees
+        # end_angle = np.pi + np.pi/6 - (np.radians(config.arc_angle))     # 210 degrees
+        start_angle = 0  # -30 degrees
+        # Use arc angle from command line parameter
+        end_angle = -np.radians(config.arc_angle) + start_angle
     # Generate arc path points in local coordinate system
     interactive_perception = InteractivePerception()
     path_points_2d_local = interactive_perception.generate_arc_path(
@@ -344,16 +344,12 @@ def define_path_and_direction(spot, config, experiment_config):
         num_points=max(10, int(config.target_distance * 20))
     )
     
+    
     # Transform arc points to vision frame
     # Account for robot's current orientation in vision frame
-    cos_yaw = np.cos(current_yaw)
-    sin_yaw = np.sin(current_yaw)
-    
-    # Rotation matrix to transform from local to vision frame
-    # rotation_matrix = np.array([
-    #     [cos_yaw, -sin_yaw],
-    #     [sin_yaw,  cos_yaw]
-    # ])
+    cos_yaw = np.cos(saved_yaw)
+    sin_yaw = np.sin(saved_yaw)
+
 
     translation_matrix = np.array([
         [cos_yaw, -sin_yaw, current_x],
@@ -365,14 +361,11 @@ def define_path_and_direction(spot, config, experiment_config):
     path_points_2d_vision = []
     path_points_2d_local -= path_points_2d_local[0]
     for point in path_points_2d_local:
-        print(f'Local point: {point}')
+        # print(f'Local point: {point}')
         # Rotate point to align with robot's orientation
-        # rotated_point = rotation_matrix @ point
         translated_point = translation_matrix @ np.array([point[0], point[1], 1])
-        print(f'Translated point in vision frame: {translated_point}')
+        # print(f'Translated point in vision frame: {translated_point}')
         # Translate to robot's current position
-        # vision_point = rotated_point + np.array([current_x, current_y])
-        # Only take the first two coordinates (x, y) from the transformed point
         path_points_2d_vision.append(translated_point[:2])
     
     path_points_2d_vision = np.array(path_points_2d_vision)
@@ -384,11 +377,11 @@ def define_path_and_direction(spot, config, experiment_config):
     direction_vector = (end_position - start_position)[:2]  # 2D direction
     direction_vector = direction_vector / np.linalg.norm(direction_vector)
     
-    print(f'Arc path defined: {len(path_points)} points from {start_position} to {end_position}')
-    print(f'Arc radius: {arc_radius:.2f}m, Angles: {np.degrees(start_angle):.1f}° to {np.degrees(end_angle):.1f}°')
-    print(f'Direction: {experiment_config["task_type"]} (arc curve)')
-    print(f'Robot orientation in vision frame: {np.degrees(current_yaw):.1f}°')
-    print(f'Path points are in vision frame coordinates')
+    # print(f'Arc path defined: {len(path_points)} points from {start_position} to {end_position}')
+    # print(f'Arc radius: {arc_radius:.2f}m, Angles: {np.degrees(start_angle):.1f}° to {np.degrees(end_angle):.1f}°')
+    # print(f'Direction: {experiment_config["task_type"]} (arc curve)')
+    # # print(f'Robot orientation in vision frame: {np.degrees(current_yaw):.1f}°')
+    # print(f'Path points are in vision frame coordinates')
     
     return {
         'start_position': start_position,
@@ -421,9 +414,13 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     print(f"Starting path-following execution")
     print(f"Max steps: {config.max_steps}, Action scale: {config.action_scale}")
     
+    # Start timing for policy execution
+    policy_start_time = time.time()
+    
     # Policy execution loop
     manipulation_success = False
     closest_path_idx = 0
+    best_distance = None
     
     for step in range(config.max_steps):
         # Get current hand position
@@ -477,7 +474,7 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
         
         # Execute movement based on task type
         try:
-            if experiment_config["task_type"] == "push":                
+            if experiment_config["task_type"] == "push" or experiment_config["task_type"] == "drag":                
                 # For pushing: move robot body while maintaining arm position
                 print('Pushing object by moving robot...')
                 dx = scaled_action[0]
@@ -498,6 +495,7 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
                     v_yaw=v_yaw,
                     dt=2.0
                 )
+
 
                 # print('Pushing object by moving robot...')
                 # target_position = current_hand_pos - scaled_action[:3]  # Note the minus sign
@@ -532,20 +530,33 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
                 block_until_arm_arrives(spot._client._command_client, cmd_id, timeout_sec=3.0)
             
             # Update closest path index for state computation
-            closest_path_idx = interactive_perception.update_closest_path_index(current_hand_pos, path_points, closest_path_idx)
+            closest_path_idx = interactive_perception.update_closest_path_index(
+                current_hand_pos, path_points, closest_path_idx)
             
             # Check success
-            if check_path_following_success(current_hand_pos, path_info, config.success_distance):
+            terminate, distance_to_goal, best_distance = check_path_following_success(
+                current_hand_pos, path_info, config.success_distance, best_distance)
+            if distance_to_goal <= config.success_distance:
                 print(f"Path following completed successfully in {step+1} steps!")
                 manipulation_success = True
+            elif terminate:
+                print(f"Terminating - robot moving away from goal")
                 break
                 
         except Exception as e:
             print(f"Error in step {step+1}: {e}")
             break
     
+    # End timing for policy execution
+    policy_end_time = time.time()
+    policy_duration = policy_end_time - policy_start_time
+    
     print(f"Policy execution completed. Success: {manipulation_success}")
+    print(f"Policy execution time: {policy_duration:.2f} seconds")
     time.sleep(2)  # Hold position to observe
+    
+    # Save experiment data
+    save_experiment_data(config, robot_positions, path_points, policy_duration, manipulation_success)
     
     # Generate plots (unless disabled)
     if not hasattr(config, 'no_plots') or not config.no_plots:
@@ -572,15 +583,83 @@ def execute_path_following_policy(spot, config, experiment_config, path_info):
     return manipulation_success
 
 
-def check_path_following_success(current_pos, path_info, success_threshold):
+def save_experiment_data(config, robot_positions, path_points, policy_duration, success):
+    """Save experiment data to files."""
+    # Create experiment directory
+    experiment_dir = f"experiment_logs/{config.experiment}"
+    os.makedirs(experiment_dir, exist_ok=True)
+    
+    # Create timestamped subdirectory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(experiment_dir, timestamp)
+    os.makedirs(run_dir, exist_ok=True)
+    
+    # Save parameters
+    params = {
+        "experiment": config.experiment,
+        "timestamp": timestamp,
+        "hostname": config.hostname,
+        "target_distance": config.target_distance,
+        "arc_angle_degrees": config.arc_angle,
+        "action_scale": config.action_scale,
+        "max_steps": config.max_steps,
+        "success_distance": config.success_distance,
+        "policy_path": config.policy_path,
+        "model_name": config.model_name,
+        "autonomous_detection": getattr(config, 'autonomous_detection', False),
+        "robot_side": getattr(config, 'robot_side', 'left'),
+        "policy_duration_seconds": policy_duration,
+        "success": success,
+        "steps_taken": len(robot_positions)
+    }
+    
+    # Save parameters as JSON
+    import json
+    with open(os.path.join(run_dir, "params.json"), 'w') as f:
+        json.dump(params, f, indent=2)
+    
+    # Save robot trajectory as CSV
+    import csv
+    with open(os.path.join(run_dir, "robot_trajectory.csv"), 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['step', 'x', 'y', 'yaw'])
+        for i, (x, y, yaw) in enumerate(robot_positions):
+            writer.writerow([i, x, y, yaw])
+    
+    # Save planned path as CSV
+    with open(os.path.join(run_dir, "planned_path.csv"), 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['point', 'x', 'y', 'z'])
+        for i, point in enumerate(path_points):
+            writer.writerow([i, point[0], point[1], point[2]])
+    
+    print(f"Experiment data saved to: {run_dir}")
+    print(f"  - params.json: Experiment parameters")
+    print(f"  - robot_trajectory.csv: Robot path data")
+    print(f"  - planned_path.csv: Planned path data")
+
+
+def check_path_following_success(current_pos, path_info, success_threshold, best_distance=None):
     """Check if path following succeeded."""
     end_position = path_info['end_position']
     distance_to_goal = np.linalg.norm(current_pos - end_position)
     
     success = distance_to_goal <= success_threshold
+    terminate = False
+
     print(f"Distance to goal: {distance_to_goal:.3f}m (threshold: {success_threshold:.3f}m)")
+    if best_distance:
+        if distance_to_goal < best_distance:
+            best_distance = distance_to_goal
+            print(f"New closest distance to goal: {best_distance:.3f}m")    
+        elif distance_to_goal > best_distance and best_distance < success_threshold:
+            terminate = True
+            print(f"Robot moving away from goal, terminating...")
+
+    else:
+        best_distance = distance_to_goal
     
-    return success
+    return terminate, distance_to_goal, best_distance
 
 
 def push_drag_main(config):
@@ -618,7 +697,7 @@ def push_drag_main(config):
             if step_result == False:
                 return cleanup_and_exit(spot, config.dock_id)
             elif step_result != 'skip':
-                path_info = define_path_and_direction(spot, config, experiment_config)
+                path_info = define_path_and_direction(spot, config, experiment_config, saved_yaw)
             else:
                 # Default path info for skip
                 path_info = {'start_position': np.array([0,0,0]), 'end_position': np.array([1,0,0])}
@@ -692,10 +771,12 @@ def main():
     
     parser.add_argument('--autonomous-detection', action='store_true',
                         help='Use autonomous box detection instead of manual selection')
-    parser.add_argument('--robot-side', choices=['left', 'right'], default='left',
+    parser.add_argument('--robot-side', choices=['left', 'right'], default='right',
                         help='Robot side for multi-robot coordination (affects grasp point selection)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Disable trajectory plotting')
+    parser.add_argument('--arc-angle', type=float, default=60.0,
+                        help='Arc angle in degrees (default: 60)')
     
     options = parser.parse_args()
     
