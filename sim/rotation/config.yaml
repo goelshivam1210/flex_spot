@@ -35,7 +35,7 @@ training:
   train_segment_mode: "short"
   stage1_threshold: 0.85
   stage1_patience: 5
-  stage1_interval: 50
+  stage1_interval: 10
   stage2_avg_threshold: 0.90
   stage2_avg_window: 10
   stage2_interval: 5
