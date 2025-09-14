@@ -34,8 +34,8 @@ training:
   save_dir: "models/"
   train_segment_mode: "short"
   stage1_threshold: 0.85
-  stage1_patience: 20
+  stage1_patience: 5
   stage1_interval: 50
-  stage2_threshold: 0.95
-  stage2_patience: 20
+  stage2_avg_threshold: 0.90
+  stage2_avg_window: 10
   stage2_interval: 5

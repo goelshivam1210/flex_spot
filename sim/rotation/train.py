@@ -6,6 +6,7 @@ import datetime
 import yaml
 import argparse
 import random
+from collections import deque
 
 import numpy as np
 import torch
@@ -160,12 +161,12 @@ def main():
     training_cfg = config["training"]
 
     eval_stage1_threshold = float(training_cfg.get("stage1_threshold", 0.85))
-    eval_stage1_patience  = int(training_cfg.get("stage1_patience", 20))
+    eval_stage1_patience  = int(training_cfg.get("stage1_patience", 5))
     eval_stage1_interval  = int(training_cfg.get("stage1_interval", args.test_freq))
 
-    eval_stage2_threshold = float(training_cfg.get("stage2_threshold", 0.95))
-    eval_stage2_patience  = int(training_cfg.get("stage2_patience", 20))
-    eval_stage2_interval  = int(training_cfg.get("stage2_interval", 5))
+    eval_stage2_avg_threshold = float(training_cfg.get("stage2_avg_threshold", 0.90))
+    eval_stage2_window = int(training_cfg.get("stage2_avg_window", 10))
+    eval_stage2_interval = int(training_cfg.get("stage2_interval", 5))
 
     curriculum_cfg = training_cfg.get("curriculum", None)
 
@@ -285,8 +286,10 @@ def main():
     eval_phase = 1
     eval_interval = eval_stage1_interval
     next_eval_ep = 0
-    stage1_streak = 0
-    stage2_streak = 0
+
+    stage1_streak   = 0
+    full_succ_hist  = deque(maxlen=eval_stage2_window)
+    dual_succ_hist  = deque(maxlen=eval_stage2_window)
 
     for ep in range(episodes):
         if curriculum_cfg is not None:
@@ -446,31 +449,46 @@ def main():
                 print(f" New best full-arc success: {best_full_success:.2f} — model saved")
             
             if eval_phase == 1:
-                meets = (full_stats["success_rate"]  >= eval_stage1_threshold and
-                        dual_stats["success_rate"]  >= eval_stage1_threshold)
+                meets = (full_stats["success_rate"] >= eval_stage1_threshold and
+                        dual_stats["success_rate"] >= eval_stage1_threshold)
                 stage1_streak = stage1_streak + 1 if meets else 0
 
                 print(f" [Stage1] streak={stage1_streak}/{eval_stage1_patience} (threshold={eval_stage1_threshold:.2f})")
                 if stage1_streak >= eval_stage1_patience:
                     eval_phase = 2
                     eval_interval = eval_stage2_interval
+                    next_eval_ep = ep + eval_interval
                     stage1_streak = 0
-                    next_eval_ep = ep + eval_interval  # tighten cadence
-                    print(f" >>> Switched to Stage 2 eval: every {eval_interval} episodes; "
-                        f"threshold={eval_stage2_threshold:.2f}; patience={eval_stage2_patience}")
+                    full_succ_hist.clear()
+                    dual_succ_hist.clear()
+                    print(f" >>> Switched to Stage 2 eval: "
+                        f"every {eval_interval} episodes; "
+                        f"avg window={eval_stage2_window}; "
+                        f"avg threshold={eval_stage2_avg_threshold:.2f}")
                 else:
                     next_eval_ep = ep + eval_interval
 
             elif eval_phase == 2:
-                meets = (full_stats["success_rate"]  >= eval_stage2_threshold and
-                        dual_stats["success_rate"]  >= eval_stage2_threshold)
-                stage2_streak = stage2_streak + 1 if meets else 0
+                full_succ_hist.append(full_stats["success_rate"])
+                dual_succ_hist.append(dual_stats["success_rate"])
 
-                print(f" [Stage2] streak={stage2_streak}/{eval_stage2_patience} (threshold={eval_stage2_threshold:.2f})")
-                if stage2_streak >= eval_stage2_patience:
+                avg_full = sum(full_succ_hist) / len(full_succ_hist)
+                avg_dual = sum(dual_succ_hist) / len(dual_succ_hist)
+
+                print(f" [Stage2] window={len(full_succ_hist)}/{eval_stage2_window} "
+                    f"avg_full={avg_full:.2f}, avg_dual={avg_dual:.2f} "
+                    f"(threshold={eval_stage2_avg_threshold:.2f})")
+
+                writer.add_scalar("Eval/FullSuccessMA", avg_full, total_steps)
+                writer.add_scalar("Eval/DualSuccessMA", avg_dual, total_steps)
+
+                if (len(full_succ_hist) == eval_stage2_window and
+                    len(dual_succ_hist) == eval_stage2_window and
+                    avg_full >= eval_stage2_avg_threshold and
+                    avg_dual >= eval_stage2_avg_threshold):
                     agent.save(models_dir, "converged_model")
-                    print(f" Early-stop: all evals ≥ {eval_stage2_threshold:.2f} for "
-                        f"{eval_stage2_patience} evals. Stopping training.")
+                    print(f" Early-stop: rolling {eval_stage2_window}-eval averages "
+                        f"≥ {eval_stage2_avg_threshold:.2f} for both Full & Dual. Stopping training.")
                     break
                 else:
                     next_eval_ep = ep + eval_interval
