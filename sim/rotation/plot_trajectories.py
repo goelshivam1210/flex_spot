@@ -160,23 +160,13 @@ def main():
 
         # CENTROID
         res_c = run_and_record(env, agent, mode="centroid", max_steps=args.max_steps)
-        title_c = (f"converged_model — CENTROID\n"
-                   f"success={res_c['success']}  "
-                   f"prog={res_c['final_progress']:.2f}  "
-                   f"dev={res_c['final_deviation']:.3f}  "
-                   f"steps={res_c['steps']}")
         out_c = os.path.join(outdir, "converged_centroid_overlay.png")
-        plot_overlay(res_c["path_xy"], res_c["exec_xy"], title_c, out_c)
+        plot_overlay(res_c["path_xy"], res_c["exec_xy"], "Simulation Environment Evaluation", out_c)
 
         # CONTACT / DUAL
         res_d = run_and_record(env, agent, mode="contact", max_steps=args.max_steps)
-        title_d = (f"converged_model — CONTACT (dual)\n"
-                   f"success={res_d['success']}  "
-                   f"prog={res_d['final_progress']:.2f}  "
-                   f"dev={res_d['final_deviation']:.3f}  "
-                   f"steps={res_d['steps']}")
         out_d = os.path.join(outdir, "converged_contact_overlay.png")
-        plot_overlay(res_d["path_xy"], res_d["exec_xy"], title_d, out_d)
+        plot_overlay(res_d["path_xy"], res_d["exec_xy"], "Simulation Environment Evaluation", out_d)
 
         env.close()
 
