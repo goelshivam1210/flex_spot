@@ -7,11 +7,21 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
 SMOOTH_WINDOW = 11
-TITLE_FONTSIZE = 20
-AXIS_FONTSIZE = 16
+TITLE_FONTSIZE = 28
+AXIS_FONTSIZE = 18
+TICK_FONTSIZE = 16
+LEGEND_FONTSIZE = 16
 LINE_WIDTH = 2.5
 FILL_ALPHA = 0.20
 FULL_REWARD_XMAX = 25_000
+
+plt.rcParams.update({
+    "axes.titlesize": TITLE_FONTSIZE,
+    "axes.labelsize": AXIS_FONTSIZE,
+    "xtick.labelsize": TICK_FONTSIZE,
+    "ytick.labelsize": TICK_FONTSIZE,
+    "legend.fontsize": LEGEND_FONTSIZE,
+})
 
 def best_run_for_tag(run_dirs, all_run_data, tag):
     """
@@ -125,15 +135,16 @@ def create_plots(parent_dir, output_dir, num_points=200):
         mean_s = mean.rolling(window=SMOOTH_WINDOW, center=True, min_periods=1).mean()
         std_s  = std.rolling(window=SMOOTH_WINDOW, center=True, min_periods=1).mean()
 
-        plt.figure(figsize=(12, 7))
-        plt.plot(steps, mean_s.values, label='Mean', linewidth=LINE_WIDTH)
-        plt.fill_between(steps,
-                        (mean_s - std_s).values,
-                        (mean_s + std_s).values,
-                        alpha=FILL_ALPHA,
-                        label='Std. Dev.')
+        fig, ax = plt.subplots(figsize=(12, 7))
 
-        ax = plt.gca()
+        ax.plot(steps, mean_s.values, label='Mean', linewidth=LINE_WIDTH)
+        ax.fill_between(
+            steps,
+            (mean_s - std_s).values,
+            (mean_s + std_s).values,
+            alpha=FILL_ALPHA,
+            label='Std. Dev.'
+        )
 
         xsf = ScalarFormatter(useMathText=True)
         xsf.set_scientific(True)
@@ -148,16 +159,23 @@ def create_plots(parent_dir, output_dir, num_points=200):
             ysf.set_useOffset(False)
             ax.yaxis.set_major_formatter(ysf)
 
-        plt.title(f"{plot_title}", fontsize=TITLE_FONTSIZE)
-        plt.xlabel("Training Timesteps", fontSize = AXIS_FONTSIZE)
-        plt.ylabel(plot_title.split('(')[0].strip(), fontSize = AXIS_FONTSIZE)
-        plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-        plt.legend()
-        
+        ax.set_title(f"{plot_title}")
+        ax.set_xlabel("Training Timesteps")
+        ax.set_ylabel(plot_title.split('(')[0].strip())
+
+        ax.tick_params(axis='both', which='major', labelsize=TICK_FONTSIZE)
+
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax.legend()
+
+        ax.margins(x=0, y=0.02)
+        ax.set_xlim(float(steps.min()), float(steps.max()))
+
+        fig.tight_layout(pad=0.1)
         filename = f"{plot_title.replace(' ', '_').replace('/', '-')}.png"
         output_path = os.path.join(output_dir, filename)
-        plt.savefig(output_path)
-        plt.close()
+        fig.savefig(output_path, bbox_inches='tight', pad_inches=0.05)
+        plt.close(fig)
         print(f"--> Saved plot to {output_path}")
     
     tags_of_interest = {
