@@ -4,12 +4,13 @@ import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
 
 SMOOTH_WINDOW = 11
 TITLE_FONTSIZE = 20
 LINE_WIDTH = 2.5
 FILL_ALPHA = 0.20
-FULL_REWARD_XMAX = 45_000
+FULL_REWARD_XMAX = 25_000
 
 def best_run_for_tag(run_dirs, all_run_data, tag):
     """
@@ -131,7 +132,16 @@ def create_plots(parent_dir, output_dir, num_points=200):
                         alpha=FILL_ALPHA,
                         label='Std. Dev.')
 
-        plt.title(f"{plot_title} (Mean of {len(all_run_data)} Seeds)", fontsize=TITLE_FONTSIZE)
+        ax = plt.gca()
+
+        ax.ticklabel_format(axis='x', style='sci', scilimits=(0, 0))
+        ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+
+        if "Reward" in plot_title:
+            ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
+            ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+
+        plt.title(f"{plot_title}", fontsize=TITLE_FONTSIZE)
         plt.xlabel("Training Timesteps")
         plt.ylabel(plot_title.split('(')[0].strip())
         plt.grid(True, which='both', linestyle='--', linewidth=0.5)
