@@ -5,6 +5,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+SMOOTH_WINDOW = 11
+TITLE_FONTSIZE = 20
+LINE_WIDTH = 2.5
+FILL_ALPHA = 0.20
+FULL_REWARD_XMAX = 45_000
+
 def best_run_for_tag(run_dirs, all_run_data, tag):
     """
     Returns (run_dir, run_name, max_val, step_at_max) for the run that has the highest value for `tag`.
@@ -108,11 +114,24 @@ def create_plots(parent_dir, output_dir, num_points=200):
             print(f"--> Skipping '{plot_title}' - no data found for this tag.")
             continue
 
+        if plot_title == "Average Reward (Full Arc)":
+            clip_mask = steps <= FULL_REWARD_XMAX
+            steps = steps[clip_mask]
+            mean = mean.iloc[clip_mask]
+            std  = std.iloc[clip_mask]
+
+        mean_s = mean.rolling(window=SMOOTH_WINDOW, center=True, min_periods=1).mean()
+        std_s  = std.rolling(window=SMOOTH_WINDOW, center=True, min_periods=1).mean()
+
         plt.figure(figsize=(12, 7))
-        plt.plot(steps, mean, label='Mean')
-        plt.fill_between(steps, mean - std, mean + std, alpha=0.2, label='Std. Dev.')
-        
-        plt.title(f"{plot_title} (Mean of {len(all_run_data)} Seeds)")
+        plt.plot(steps, mean_s.values, label='Mean', linewidth=LINE_WIDTH)
+        plt.fill_between(steps,
+                        (mean_s - std_s).values,
+                        (mean_s + std_s).values,
+                        alpha=FILL_ALPHA,
+                        label='Std. Dev.')
+
+        plt.title(f"{plot_title} (Mean of {len(all_run_data)} Seeds)", fontsize=TITLE_FONTSIZE)
         plt.xlabel("Training Timesteps")
         plt.ylabel(plot_title.split('(')[0].strip())
         plt.grid(True, which='both', linestyle='--', linewidth=0.5)
