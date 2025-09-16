@@ -8,6 +8,7 @@ from matplotlib.ticker import ScalarFormatter
 
 SMOOTH_WINDOW = 11
 TITLE_FONTSIZE = 20
+AXIS_FONTSIZE = 16
 LINE_WIDTH = 2.5
 FILL_ALPHA = 0.20
 FULL_REWARD_XMAX = 25_000
@@ -134,16 +135,22 @@ def create_plots(parent_dir, output_dir, num_points=200):
 
         ax = plt.gca()
 
-        ax.ticklabel_format(axis='x', style='sci', scilimits=(0, 0))
-        ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+        xsf = ScalarFormatter(useMathText=True)
+        xsf.set_scientific(True)
+        xsf.set_powerlimits((0, 0))
+        xsf.set_useOffset(False)
+        ax.xaxis.set_major_formatter(xsf)
 
         if "Reward" in plot_title:
-            ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
-            ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+            ysf = ScalarFormatter(useMathText=True)
+            ysf.set_scientific(True)
+            ysf.set_powerlimits((0, 0))
+            ysf.set_useOffset(False)
+            ax.yaxis.set_major_formatter(ysf)
 
         plt.title(f"{plot_title}", fontsize=TITLE_FONTSIZE)
-        plt.xlabel("Training Timesteps")
-        plt.ylabel(plot_title.split('(')[0].strip())
+        plt.xlabel("Training Timesteps", fontSize = AXIS_FONTSIZE)
+        plt.ylabel(plot_title.split('(')[0].strip(), fontSize = AXIS_FONTSIZE)
         plt.grid(True, which='both', linestyle='--', linewidth=0.5)
         plt.legend()
         
