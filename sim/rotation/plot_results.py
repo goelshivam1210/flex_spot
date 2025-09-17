@@ -7,10 +7,10 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
 SMOOTH_WINDOW = 11
-TITLE_FONTSIZE = 28
-AXIS_FONTSIZE = 18
-TICK_FONTSIZE = 16
-LEGEND_FONTSIZE = 16
+TITLE_FONTSIZE = 36
+AXIS_FONTSIZE = 24
+TICK_FONTSIZE = 24
+LEGEND_FONTSIZE = 24
 LINE_WIDTH = 2.5
 FILL_ALPHA = 0.20
 FULL_REWARD_XMAX = 25_000
@@ -135,13 +135,23 @@ def create_plots(parent_dir, output_dir, num_points=200):
         mean_s = mean.rolling(window=SMOOTH_WINDOW, center=True, min_periods=1).mean()
         std_s  = std.rolling(window=SMOOTH_WINDOW, center=True, min_periods=1).mean()
 
+        is_success_plot = "Success Rate" in plot_title
+        if is_success_plot:
+            mean_plot = mean_s.clip(lower=0.0, upper=1.0).values
+            lower = (mean_s - std_s).clip(lower=0.0, upper=1.0).values
+            upper = (mean_s + std_s).clip(lower=0.0, upper=1.0).values
+        else:
+            mean_plot = mean_s.values
+            lower = (mean_s - std_s).values
+            upper = (mean_s + std_s).values
+
         fig, ax = plt.subplots(figsize=(12, 7))
 
         ax.plot(steps, mean_s.values, label='Mean', linewidth=LINE_WIDTH)
         ax.fill_between(
             steps,
-            (mean_s - std_s).values,
-            (mean_s + std_s).values,
+            lower, 
+            upper,
             alpha=FILL_ALPHA,
             label='Std. Dev.'
         )
@@ -170,6 +180,9 @@ def create_plots(parent_dir, output_dir, num_points=200):
 
         ax.margins(x=0, y=0.02)
         ax.set_xlim(float(steps.min()), float(steps.max()))
+
+        if is_success_plot:
+            ax.set_ylim(0.0, 1.0)
 
         fig.tight_layout(pad=0.1)
         filename = f"{plot_title.replace(' ', '_').replace('/', '-')}.png"
