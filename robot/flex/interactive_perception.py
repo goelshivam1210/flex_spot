@@ -140,29 +140,31 @@ class InteractivePerception:
         return self.joint_type, self.joint_params
     
     def construct_state_vector(self, current_position, initial_position):
-        """
-        Construct state vector for policy input.
-        
-        Args:
-            current_position: Current gripper position [x, y, z] 
-            initial_position: Initial grasp position [x, y, z]
-            
-        Returns:
-            np.array: State vector [joint_axis_x, joint_axis_y, joint_axis_z, 
-                                   displacement_x, displacement_y, displacement_z]
-        """
         if self.joint_params is None:
             raise ValueError("Must analyze trajectory first!")
         
-        # Calculate displacement from initial position
-        displacement = current_position - initial_position
-        
-        # Get normalized joint axis
         joint_axis = self.joint_params["axis"]
         joint_axis = joint_axis / np.linalg.norm(joint_axis)
         
-        # Construct state: [joint_axis (3D), displacement (3D)]
-        state = np.concatenate([joint_axis, displacement])
+        if self.joint_type == "prismatic":
+            # Prismatic: [hp, Δpt]
+            displacement = current_position - initial_position
+            state = np.concatenate([joint_axis, displacement])
+            
+        elif self.joint_type == "revolute":
+            # Revolute: [hr, vt]
+            # vt = (pt - pr) - [(pt - pr)·hr]hr
+            joint_center = self.joint_params["center"]  # pr
+            vector_to_point = current_position - joint_center  # pt - pr
+            
+            # Project onto plane perpendicular to rotation axis
+            projection_on_axis = np.dot(vector_to_point, joint_axis) * joint_axis
+            vt = vector_to_point - projection_on_axis
+            
+            state = np.concatenate([joint_axis, vt])
+        
+        else:
+            raise ValueError(f"Unknown joint type: {self.joint_type}")
         
         return state.astype(np.float32)
     
