@@ -1,8 +1,8 @@
 import os
 import numpy as np
 
-from flex.alg import TD3
-from flex.path_following_td3 import TD3
+from flex.alg import TD3 as DoorTD3
+from flex.path_following_td3 import TD3 as PathTD3
 
 
 class PolicyManager:
@@ -19,10 +19,10 @@ class PolicyManager:
         self.models_dir = models_dir
         self.current_policy = None
         self.current_joint_type = None
-        
+    
     def load_policy(self, joint_type):
         """
-        Load TD3 policy for specified joint type.
+        Load TD3 policy for specified joint type (door opening).
         
         Args:
             joint_type: "prismatic" or "revolute"
@@ -30,25 +30,24 @@ class PolicyManager:
         Returns:
             TD3 policy object
         """
-        
-        # Policy parameters (match your trained models)
+        # Policy parameters
         state_dim = 6
-        action_dim = 3  
+        action_dim = 3
         max_action = 1.0
         
-        # Load appropriate model
+        # Construct model path: models/prismatic or models/revolute
         model_path = os.path.join(self.models_dir, joint_type)
         
         if not os.path.exists(f"{model_path}/final_actor.pth"):
             raise FileNotFoundError(f"Policy not found: {model_path}/final_actor.pth")
         
-        # Create and load policy
-        policy = TD3(0.001, state_dim, action_dim, max_action)
-        policy.load_actor(self.models_dir + f"/{joint_type}", "final")
+        # Create and load policy - Use DoorTD3 (NO max_torque)
+        policy = DoorTD3(0.001, state_dim, action_dim, max_action)
+        policy.load_actor(model_path, "final")  # Use model_path consistently
         
         self.current_policy = policy
         self.current_joint_type = joint_type
-        print(f"→ Loaded {joint_type} policy")
+        print(f"→ Loaded {joint_type} policy from {model_path}")
         
         return policy
     
@@ -63,20 +62,17 @@ class PolicyManager:
         Returns:
             TD3 policy object for path-following
         """
-                
         # Path-following policy parameters
-        state_dim = 8        # [lateral_error, longitudinal_error, orientation_error, 
-                            #  progress, deviation, speed_along_path, box_forward_x, box_forward_y]
-        action_dim = 3       # [force_x, force_y, torque_z]
-        max_action = 1.0     # Normalized output range
-        max_torque = 50.0    # From simulation configuration
+        state_dim = 8
+        action_dim = 3
+        max_action = 1.0
+        max_torque = 50.0
         
-        # Check if model exists
         if not os.path.exists(f"{policy_path}/{model_name}_actor.pth"):
             raise FileNotFoundError(f"Path-following policy not found: {policy_path}/{model_name}_actor.pth")
         
-        # Create and load policy
-        policy = TD3(0.0001, state_dim, action_dim, max_action, max_torque)
+        # Create and load policy - Use PathTD3 (WITH max_torque)
+        policy = PathTD3(0.0001, state_dim, action_dim, max_action, max_torque)
         policy.load_actor(policy_path, model_name)
         
         self.current_policy = policy
@@ -84,65 +80,3 @@ class PolicyManager:
         print(f"→ Loaded path-following policy from {policy_path}/{model_name}")
         
         return policy
-    
-    # def get_policy_action(self, state):
-    #     """
-    #     Get action from current policy given state.
-        
-    #     Args:
-    #         state: State vector from interactive perception
-            
-    #     Returns:
-    #         np.array: Action vector [force_x, force_y, force_z]
-    #     """
-    #     if self.current_policy is None:
-    #         raise ValueError("No policy loaded!")
-        
-    #     # Get action from policy
-    #     action = self.current_policy.select_action(state)
-        
-    #     return action
-    
-    # def convert_action_to_target_position(self, action, current_position, action_scale=0.02):
-    #     """
-    #     Convert policy action to target position for robot.
-        
-    #     Args:
-    #         action: Policy action [force_x, force_y, force_z] 
-    #         current_position: Current gripper position [x, y, z]
-    #         action_scale: Scale factor for action (meters)
-            
-    #     Returns:
-    #         np.array: Target position [x, y, z]
-    #     """
-    #     # Scale action and add to current position
-    #     scaled_action = action * action_scale
-    #     target_position = current_position + scaled_action
-        
-    #     return target_position
-    
-    # def execute_policy_step(self, state, current_position, robot_interface, action_scale=0.02):
-    #     """
-    #     Execute one policy step: get action, convert to command, send to robot.
-        
-    #     Args:
-    #         state: Current state vector
-    #         current_position: Current gripper position
-    #         robot_interface: Robot interface for sending commands
-    #         action_scale: Scale factor for actions
-            
-    #     Returns:
-    #         tuple: (action, target_position)
-    #     """
-    #     # Get action from policy
-    #     action = self.get_policy_action(state)
-        
-    #     # Convert to target position
-    #     target_position = self.convert_action_to_target_position(
-    #         action, current_position, action_scale
-    #     )
-        
-    #     # Send command to robot
-    #     robot_interface.move_arm_to_position(target_position)
-        
-    #     return action, target_position
