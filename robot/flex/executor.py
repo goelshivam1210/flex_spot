@@ -9,8 +9,8 @@ import logging
 from typing import Tuple, Dict, Any
 
 from flex.config import FlexConfig
-from interactive_perception import InteractivePerception
-from policy_manager import PolicyManager
+from flex.interactive_perception import InteractivePerception
+from flex.policy_manager import PolicyManager
 
 logger = logging.getLogger(__name__)
 

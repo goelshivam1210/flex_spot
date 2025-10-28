@@ -39,7 +39,8 @@ class PolicyManager:
         model_path = os.path.join(self.models_dir, joint_type)
         
         if not os.path.exists(f"{model_path}/final_actor.pth"):
-            raise FileNotFoundError(f"Policy not found: {model_path}/final_actor.pth")
+            current_directory = os.getcwd()
+            raise FileNotFoundError(f"Policy not found: {model_path}/final_actor.pth. Current dir: {current_directory}")
         
         # Create and load policy - Use DoorTD3 (NO max_torque)
         policy = DoorTD3(0.001, state_dim, action_dim, max_action)
