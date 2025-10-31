@@ -34,6 +34,9 @@ class FlexExecutor:
             models_dir=config.prismatic_policy_path.rsplit('/', 1)[0]  # Get base models dir
         )
         self._policy_cache = {}
+
+        # used to cancel an executing policy
+        self.should_cancel=False
     
     def analyze_joint(self, env) -> Tuple[str, Dict[str, Any]]:
         """
@@ -45,7 +48,10 @@ class FlexExecutor:
         logger.info("="*60)
         logger.info("PHASE 1: Joint Analysis")
         logger.info("="*60)
-        
+
+        # reset cancel flag
+        self.should_cancel=False
+
         # Reset and get starting position
         obs, info = env.reset()
         start_position = obs
@@ -59,6 +65,10 @@ class FlexExecutor:
         trajectory = [start_position.copy()]
         
         for i, target_pos in enumerate(wiggle_positions):
+            if self.should_cancel:
+                logger.info("analyze_joint cancelled by user")
+                return None, None
+
             logger.info(f"Wiggle movement {i+1}/{len(wiggle_positions)}")
             obs, reward, terminated, truncated, info = env.step(target_pos)
             trajectory.append(obs.copy())
@@ -97,6 +107,9 @@ class FlexExecutor:
         logger.info("="*60)
         logger.info(f"PHASE 2: Policy Execution ({joint_type})")
         logger.info("="*60)
+
+        # reset cancel flag
+        self.should_cancel=False
         
         if joint_type not in ['prismatic', 'revolute']:
             msg = f"Invalid joint type: {joint_type}"
@@ -123,6 +136,10 @@ class FlexExecutor:
         step = 0
         
         for step in range(self.config.max_steps):
+            if self.should_cancel:
+                logger.info("execute_policy cancelled by user")
+                return None, None
+
             logger.info(f"\nStep {step+1}/{self.config.max_steps}")
             
             # Get action from policy
@@ -155,6 +172,11 @@ class FlexExecutor:
         logger.info("="*60)
         
         return success, msg
+
+    def cancel_policy(self):
+        """Cancel current policy execution."""
+        logger.info("Cancelling policy execution")
+        self.should_cancel=True
     
     def _get_policy(self, joint_type: str):
         """Load policy (uses PolicyManager)."""
