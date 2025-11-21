@@ -83,7 +83,7 @@ class FlexExecutor:
         logger.info(f"Analysis complete: {joint_type}")
         logger.info(f"Parameters: {joint_params}")
         logger.info("="*60)
-        
+
         return joint_type, joint_params
     
     def execute_policy(self, env, joint_type: str, 
@@ -127,20 +127,20 @@ class FlexExecutor:
             
             # Get action from policy
             raw_action = policy.select_action(obs)
-            logger.debug(f"  Raw action: {raw_action}")
+            logger.info(f"  Raw action: {raw_action}")
             
             # Process action based on joint type
             processed_action = self._process_action(raw_action, joint_type, joint_params)
-            logger.debug(f"  Processed action: {processed_action}")
+            logger.info(f"  Processed action: {processed_action}")
             
             # Execute via environment
             obs, reward, terminated, truncated, info = env.step(processed_action)
-            
+
             # Get current position and check success
             current_position = self._get_current_position(env)
-            success = self._check_success(joint_type, joint_params, 
+            success = self._check_success(joint_type, joint_params,
                                          initial_position, current_position)
-            
+
             if success or terminated or truncated:
                 break
         
@@ -184,7 +184,7 @@ class FlexExecutor:
             action = action.flatten()
         
         # Spot-specific inversion
-        action[0] = -action[0]
+        action[1] = -action[1]
         
         if joint_type == "prismatic":
             sliding_axis = joint_params["axis"]

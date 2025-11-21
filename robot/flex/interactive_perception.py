@@ -121,6 +121,13 @@ class InteractivePerception:
         
         print(f"Prismatic error: {prismatic_error:.6f}")
         print(f"Revolute error: {revolute_error:.6f}")
+
+        # add override based on the estimated max radius
+        if revolute_radius>2.0:
+            print (f"Revolute radius {revolute_radius:.2f}m too large -- interpreting it as prismatic")
+            self.joint_type = "prismatic"
+            self.joint_params = {"axis": prismatic_axis, "error": prismatic_error}
+            return self.joint_type, self.joint_params
         
         # Select joint type based on lower error
         if prismatic_error < revolute_error:
