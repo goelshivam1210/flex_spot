@@ -14,8 +14,8 @@ class FlexConfig:
     action_scale: float = 0.02
     
     # Success thresholds
-    success_distance: float = 0.1    # meters, for prismatic joints
-    success_angle: float = 60.0       # degrees, for revolute joints
+    success_distance: float = 0.3    # meters, for prismatic joints
+    success_angle: float = 90.0       # degrees, for revolute joints
     
     # Analysis parameters
     movement_distance: float = 0.05   # wiggle distance in meters
