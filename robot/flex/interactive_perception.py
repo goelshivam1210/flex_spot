@@ -15,6 +15,29 @@ import numpy as np
 from sklearn.decomposition import PCA
 from scipy.optimize import least_squares
 
+def project_points_onto_plane(points, normal_vector, origin):
+    """
+    Project 3D points onto a plane defined by:
+        - normal_vector: unit normal to the plane
+        - origin: a point on the plane
+
+    Args:
+        points: (N, 3) array of 3D points
+        normal_vector: (3,) plane normal (does not need to be normalized)
+        origin: (3,) point on the plane
+
+    Returns:
+        (N, 3) array of projected 3D points
+    """
+    normal = normal_vector / np.linalg.norm(normal_vector)
+    projected_points = []
+    for p in points:
+        v = p - origin
+        distance = np.dot(v, normal)
+        projected_point = p - distance * normal
+        projected_points.append(projected_point)
+    return np.array(projected_points)
+
 
 class InteractivePerception:
     """
@@ -24,12 +47,16 @@ class InteractivePerception:
     3. Constructing state vectors for policy input
     """
     
-    def __init__(self, movement_distance=0.05):
+    def __init__(self, movement_distance=0.15):
         """
         Args:
             movement_distance: Distance to move in each direction (meters)
         """
         self.movement_distance = movement_distance
+        self.max_revolute_radius = 2.0
+        self.small_motion_threshold = 0.10
+        self.revolute_better_factor = 0.5
+
         self.joint_params = None
         self.joint_type = None
     
@@ -44,129 +71,558 @@ class InteractivePerception:
             list: Target positions for wiggling sequence
         """
         positions = [start_position.copy()]  # Start position
+        d = self.movement_distance
         
-        # 4 directions: forward, backward, left, right
+        # Cardinal directions (x/y plane)
         directions = [
-            np.array([self.movement_distance, 0, 0]),   # Forward
-            np.array([-self.movement_distance, 0, 0]),  # Backward
-            np.array([0, -self.movement_distance, 0]),   # Right  
-            np.array([0, self.movement_distance, 0]),   # Left
+            np.array([ d,  0, 0]),   # +X (forward)
+            np.array([-d,  0, 0]),   # -X (backward)
+            np.array([ 0,  d, 0]),   # +Y (left)
+            np.array([ 0, -d, 0]),   # -Y (right)
+            # # Diagonals to excite more directions in the plane
+            # np.array([ 0.7*d,  0.7*d, 0]),   # NE
+            # np.array([-0.7*d, -0.7*d, 0]),   # SW
+            # np.array([ 0.7*d, -0.7*d, 0]),   # SE
+            # np.array([-0.7*d,  0.7*d, 0]),   # NW
         ]
-        
+
+        num_substeps = 5
+
         for direction in directions:
-            # Move to direction
-            target = start_position + direction
-            positions.append(target.copy())
-            
-            # Return to center
+            for step in range(1, num_substeps+1):
+                # add segments
+                increment = direction * (step/num_substeps)
+                target = start_position + increment
+                positions.append(target.copy())
+            # return to this direction at the end of this directional movement
             positions.append(start_position.copy())
+
+            # # Move to direction
+            # target = start_position + direction
+            # positions.append(target.copy())
+            #
+            # # Return to center
+            # positions.append(start_position.copy())
         
         return positions
     
+    # def prismatic_error_analysis(self, trajectory):
+    #     """Calculate prismatic joint error and axis."""
+    #     centroid = np.mean(trajectory, axis=0)
+    #     X = trajectory - centroid
+    #     _, _, Vt = np.linalg.svd(X)
+    #     line_direction = Vt[0]
+    #     projections = np.dot(X, line_direction[:, np.newaxis]) * line_direction
+    #     residuals = np.linalg.norm(X - projections, axis=1)
+    #     ss_residuals = np.sum(residuals**2) / len(trajectory)
+    #     return ss_residuals, line_direction
+
     def prismatic_error_analysis(self, trajectory):
-        """Calculate prismatic joint error and axis."""
+        """
+        Fit a line to the 3D trajectory and compute mean squared perpendicular distance.
+
+        Args:
+            trajectory: (N, 3) array of 3D EE positions.
+
+        Returns:
+            (mse, axis):
+                mse: scalar mean squared distance from points to best-fit line.
+                axis: (3,) unit vector along the prismatic joint axis.
+        """
+        trajectory = np.asarray(trajectory)
         centroid = np.mean(trajectory, axis=0)
         X = trajectory - centroid
-        _, _, Vt = np.linalg.svd(X)
-        line_direction = Vt[0]
-        projections = np.dot(X, line_direction[:, np.newaxis]) * line_direction
-        residuals = np.linalg.norm(X - projections, axis=1) 
-        ss_residuals = np.sum(residuals**2) / len(trajectory)
-        return ss_residuals, line_direction
-    
-    def revolute_error_analysis(self, trajectory):
-        """Calculate revolute joint error and parameters."""
-        mean = np.mean(trajectory, axis=0) 
-        X = trajectory - mean
-        pca = PCA(n_components=3)
-        pca.fit(X)
 
-        normal_vector = pca.components_[-1]
-        
-        # Simple circle fitting
-        def residuals(params, points):
-            center = np.array([params[0], params[1], params[2]])
-            radius = params[3]
-            distance = np.linalg.norm(points - center, axis=1) - radius
-            return distance
-        
-        # Initial estimate
-        initial_center = mean
-        initial_radius = np.std(np.linalg.norm(X, axis=1))
-        initial_guess = np.concatenate([initial_center, [initial_radius]])
-        
-        result = least_squares(residuals, initial_guess, args=(trajectory,))
-        center = result.x[:-1]
-        radius = result.x[-1]
-        
-        # Calculate MSE
-        distances = np.linalg.norm(trajectory - center, axis=1)
-        mse = np.mean((distances - radius) ** 2)
-        
-        return mse, center, radius, normal_vector
-    
-    def analyze_trajectory_and_estimate_joint(self, trajectory):
+        # SVD ≈ PCA: first right-singular vector is principal direction
+        _, _, Vt = np.linalg.svd(X)
+        axis = Vt[0]
+        axis /= np.linalg.norm(axis)
+
+        # Project points onto axis and compute perpendicular residuals
+        proj_scalars = X @ axis
+        projections = np.outer(proj_scalars, axis)
+        residuals = np.linalg.norm(X - projections, axis=1)
+        mse = np.mean(residuals**2)
+
+        return mse, axis
+
+    def fit_model_2d(self, points_2d):
         """
-        Analyze trajectory to estimate joint type and parameters.
-        
-        Args:
-            trajectory: Array of positions [N x 3]
-            
+        Fit a line or circle to 2D points and return a model + confidence.
+
         Returns:
-            tuple: (joint_type, joint_params)
+            (model, confidence) where model is:
+                ("LINEAR", {"direction": (2,), "point": (2,)})
+                ("CIRCULAR", {"center": (2,), "radius": float})
+                ("UNDEFINED", None)
         """
-        # Calculate errors for both joint types
-        prismatic_error, prismatic_axis = self.prismatic_error_analysis(trajectory)
-        revolute_error, revolute_center, revolute_radius, revolute_axis = self.revolute_error_analysis(trajectory)
-        
-        print(f"Prismatic error: {prismatic_error:.6f}")
-        print(f"Revolute error: {revolute_error:.6f}")
-        
-        # Select joint type based on lower error
-        if prismatic_error < revolute_error:
+        pts = np.asarray(points_2d, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            raise ValueError("points_2d must be (N, 2).")
+        x_arr = pts[:, 0]
+        y_arr = pts[:, 1]
+        n = len(pts)
+
+        span = np.hypot(x_arr[-1] - x_arr[0], y_arr[-1] - y_arr[0])
+        if n < 5 or span < 0.01:
+            return ("UNDEFINED", None), 0.0
+
+        x_mean, y_mean = np.mean(x_arr), np.mean(y_arr)
+        _, _, vh = np.linalg.svd(np.vstack([x_arr - x_mean, y_arr - y_mean]).T)
+        dir_x, dir_y = vh[0]
+        normal_x, normal_y = -dir_y, dir_x
+        line_residuals = (x_arr - x_mean) * normal_x + (y_arr - y_mean) * normal_y
+        rss_line = np.sum(line_residuals ** 2)
+
+        def circle_residuals(params, x_in, y_in):
+            xc, yc, r = params
+            return np.sqrt((x_in - xc) ** 2 + (y_in - yc) ** 2) - r
+
+        initial_r = span / 2 + 0.1
+        try:
+            res = least_squares(circle_residuals, [x_mean, y_mean, initial_r], args=(x_arr, y_arr))
+            rss_circle = np.sum(res.fun ** 2)
+            circle_params = res.x
+        except Exception:
+            res = None
+            rss_circle = np.inf
+            circle_params = None
+
+        aic_line = n * np.log(rss_line / n + 1e-9) + 2 * 2
+        aic_circle = n * np.log(rss_circle / n + 1e-9) + 2 * 3
+        is_circular = aic_circle < (aic_line - 2.0)
+
+        if not is_circular:
+            rmse = np.sqrt(rss_line / n)
+            score_fit = np.clip(1.0 - (rmse / 0.02), 0.0, 1.0)
+            score_span = np.clip(span / 0.10, 0.0, 1.0)
+            confidence = score_fit * score_span
+            model = ("LINEAR", {"direction": np.array([dir_x, dir_y]), "point": np.array([x_mean, y_mean])})
+            return model, confidence
+
+        if circle_params is None:
+            return ("UNDEFINED", None), 0.0
+
+        xc, yc, r_est = circle_params
+        mse = rss_circle / max(n - 3, 1)
+        try:
+            j = res.jac
+            cov = np.linalg.pinv(j.T @ j) * mse
+            sigma_r = np.sqrt(cov[2, 2])
+            score_math = np.clip(1.0 - (sigma_r / r_est), 0.0, 1.0)
+        except Exception:
+            score_math = 0.0
+
+        angles = np.arctan2(y_arr - yc, x_arr - xc)
+        angles = np.unwrap(angles)
+        angle_span = np.abs(angles[-1] - angles[0])
+        score_span = np.clip(angle_span / 0.26, 0.0, 1.0)
+        confidence = score_math * score_span
+        model = ("CIRCULAR", {"center": np.array([xc, yc]), "radius": r_est})
+        return model, confidence
+
+    def fit_circle_in_plane(self, points_3d, axis):
+        """
+        Fit a circle to 3D points that lie (approximately) in a plane
+        orthogonal to a known axis.
+
+        Args:
+            points_3d: (N, 3) array of CENTERED 3D points (mean should be ~zero).
+            axis: (3,) unit vector normal to the motion plane.
+
+        Returns:
+            center3d: (3,) circle center in CENTERED coordinates.
+            radius: scalar circle radius.
+        """
+        # DON'T compute origin - points are already centered!
+        # origin = np.mean(points_3d, axis=0)  # ← REMOVE THIS
+
+        # Project points onto plane orthogonal to axis through origin (0,0,0)
+        origin = np.zeros(3)  # Use origin since points_3d is already centered
+        projected = project_points_onto_plane(points_3d, axis, origin)
+
+        # Embed plane in 2D via PCA
+        pca2 = PCA(n_components=2).fit(projected)
+        points_2d = pca2.transform(projected)
+
+        # Circle residuals in 2D: distance to center - mean radius
+        def circle_residuals(c, pts):
+            d = np.linalg.norm(pts - c, axis=1)
+            return d - d.mean()
+
+        c0 = points_2d.mean(axis=0)
+        res = least_squares(circle_residuals, c0, args=(points_2d,))
+        center_2d = res.x
+
+        # Compute radius as mean distance to fitted center
+        radii = np.linalg.norm(points_2d - center_2d, axis=1)
+        radius = radii.mean()
+
+        # Map 2D center back to 3D plane coordinates
+        center_plane = pca2.inverse_transform(center_2d)
+
+        # center3d is in CENTERED coordinates (relative to trajectory mean)
+        return center_plane, radius
+
+    def revolute_error_analysis(self, trajectory):
+        """
+        Estimate revolute joint parameters from a 3D trajectory.
+
+        Pipeline (matches paper conceptually):
+            1. Center data at mean.
+            2. 3D PCA: axis = smallest-variance component (plane normal).
+            3. Fit a circle in the plane orthogonal to axis.
+            4. Clamp radius to max_revolute_radius.
+            5. Compute MSE in 3D wrt this circle (constant distance to center).
+
+        Args:
+            trajectory: (N, 3) array of 3D EE positions.
+
+        Returns:
+            (mse, center_world, radius, axis):
+                mse: scalar mean squared (‖p - center‖ - radius)^2
+                center_world: (3,) circle center in world frame.
+                radius: scalar radius (clamped).
+                axis: (3,) unit vector for rotation axis direction.
+        """
+        trajectory = np.asarray(trajectory)
+
+        # Center trajectory at mean (world <-> centered conversion)
+        mean_world = np.mean(trajectory, axis=0)
+        X = trajectory - mean_world
+
+        # 3D PCA to get candidate axis: smallest variance direction
+        pca3 = PCA(n_components=3).fit(X)
+        axis = pca3.components_[-1]
+        axis /= np.linalg.norm(axis)
+
+        # Fit circle in plane orthogonal to axis (in centered coordinates)
+        center_centered, radius = self.fit_circle_in_plane(X, axis)
+
+        # Clamp radius to physical prior
+        radius = float(min(radius, self.max_revolute_radius))
+
+        # Convert center back to world coordinates
+        center_world = center_centered + mean_world
+
+        # Compute MSE in 3D: distance to center - radius
+        d = np.linalg.norm(trajectory - center_world, axis=1)
+        mse = np.mean((d - radius) ** 2)
+
+        return mse, center_world, radius, axis
+    # def revolute_error_analysis(self, trajectory):
+    #     """Calculate revolute joint error and parameters."""
+    #     mean = np.mean(trajectory, axis=0)
+    #     X = trajectory - mean
+    #     pca = PCA(n_components=3)
+    #     pca.fit(X)
+    #
+    #     normal_vector = pca.components_[-1]
+    #
+    #     # Simple circle fitting
+    #     def residuals(params, points):
+    #         center = np.array([params[0], params[1], params[2]])
+    #         radius = params[3]
+    #         distance = np.linalg.norm(points - center, axis=1) - radius
+    #         return distance
+    #
+    #     # Initial estimate
+    #     initial_center = mean
+    #     initial_radius = np.std(np.linalg.norm(X, axis=1))
+    #     initial_guess = np.concatenate([initial_center, [initial_radius]])
+    #
+    #     result = least_squares(residuals, initial_guess, args=(trajectory,))
+    #     center = result.x[:-1]
+    #     radius = result.x[-1]
+    #
+    #     # Calculate MSE
+    #     distances = np.linalg.norm(trajectory - center, axis=1)
+    #     mse = np.mean((distances - radius) ** 2)
+    #
+    #     return mse, center, radius, normal_vector
+
+    def analyze_trajectory_and_estimate_joint(self, trajectory, plot_fits=True, plot_path=None):
+        """
+        Analyze a *dense* EE trajectory and estimate joint type & parameters.
+
+        Args:
+            trajectory: (N, 3) array of 3D EE positions collected while
+                        executing a wiggle motion.
+            plot_fits: whether to save a plot with both line and circle fits.
+            plot_path: optional filepath for the plot output.
+
+        Returns:
+            (joint_type, joint_params) where:
+                joint_type: "prismatic" or "revolute"
+                joint_params:
+                    If prismatic:
+                        {
+                            "axis": (3,) unit vector,
+                            "error": float
+                        }
+                    If revolute:
+                        {
+                            "axis": (3,) unit vector,
+                            "center": (3,),
+                            "radius": float,
+                            "error": float
+                        }
+        """
+        trajectory = np.asarray(trajectory)
+
+        # Basic sanity check: if too few points, just bail out as prismatic
+        if trajectory.shape[0] < 5:
+            raise ValueError("Trajectory too short; need at least 5 points.")
+
+        # Compute prismatic and revolute fits
+        pris_error, pris_axis = self.prismatic_error_analysis(trajectory)
+        rev_error, rev_center, rev_radius, rev_axis = self.revolute_error_analysis(trajectory)
+
+        print(f"[InteractivePerception] Prismatic error: {pris_error:.6e}")
+        model_2d, conf_2d = self.fit_model_2d(trajectory[:, :2])
+        print(f"[InteractivePerception] 2D model: {model_2d[0]}, confidence: {conf_2d:.3f}")
+
+        z_range = np.ptp(trajectory[:, 2]) if trajectory.shape[1] >= 3 else 0.0
+        if z_range <= 0.5 and conf_2d >= 0.5 and model_2d[0] != "UNDEFINED":
+            if model_2d[0] == "CIRCULAR":
+                center_xy = model_2d[1]["center"]
+                radius = float(model_2d[1]["radius"])
+                center_world = np.array([center_xy[0], center_xy[1], float(np.mean(trajectory[:, 2]))])
+                d = np.linalg.norm(trajectory[:, :2] - center_xy, axis=1)
+                mse = np.mean((d - radius) ** 2)
+                self.joint_type = "revolute"
+                self.joint_params = {
+                    "axis": np.array([0.0, 0.0, 1.0]),
+                    "center": center_world,
+                    "radius": radius,
+                    "error": mse,
+                }
+                print("[InteractivePerception] Using 2D circular fit -> REVOLUTE")
+                return self.joint_type, self.joint_params
+
+            direction_xy = model_2d[1]["direction"]
+            axis = np.array([direction_xy[0], direction_xy[1], 0.0])
+            axis = axis / np.linalg.norm(axis)
             self.joint_type = "prismatic"
-            self.joint_params = {"axis": prismatic_axis, "error": prismatic_error}
-            print("Estimated joint type: PRISMATIC")
-        else:
-            self.joint_type = "revolute" 
             self.joint_params = {
-                "center": revolute_center,
-                "radius": revolute_radius, 
-                "axis": revolute_axis,
-                "error": revolute_error
+                "axis": axis,
+                "error": pris_error,
             }
-            print("Estimated joint type: REVOLUTE")
-        
-        return self.joint_type, self.joint_params
-    
-    def construct_state_vector(self, current_position, initial_position):
-        if self.joint_params is None:
-            raise ValueError("Must analyze trajectory first!")
-        
-        joint_axis = self.joint_params["axis"]
-        joint_axis = joint_axis / np.linalg.norm(joint_axis)
-        
-        if self.joint_type == "prismatic":
-            # Prismatic: [hp, Δpt]
-            displacement = current_position - initial_position
-            state = np.concatenate([joint_axis, displacement])
-            
-        elif self.joint_type == "revolute":
-            # Revolute: [hr, vt]
-            # vt = (pt - pr) - [(pt - pr)·hr]hr
-            joint_center = self.joint_params["center"]  # pr
-            vector_to_point = current_position - joint_center  # pt - pr
-            
-            # Project onto plane perpendicular to rotation axis
-            projection_on_axis = np.dot(vector_to_point, joint_axis) * joint_axis
-            vt = vector_to_point - projection_on_axis
-            
-            state = np.concatenate([joint_axis, vt])
-        
+            print("[InteractivePerception] Using 2D linear fit -> PRISMATIC")
+            return self.joint_type, self.joint_params
+
+        print(f"[InteractivePerception] Revolute  error: {rev_error:.6e}")
+        print(f"[InteractivePerception] Revolute radius: {rev_radius:.3f} m")
+
+        if plot_fits:
+            try:
+                self.plot_trajectory_with_fits(
+                    trajectory,
+                    show=False,
+                    save_path=plot_path,
+                )
+            except ImportError as exc:
+                print(f"[InteractivePerception] Plot skipped: {exc}")
+
+        # Heuristic 1: if radius is essentially at the max limit, treat as prismatic
+        if rev_radius >= self.max_revolute_radius - 1e-6:
+            print(f"[InteractivePerception] Radius {rev_radius:.2f} m ≥ max ({self.max_revolute_radius}) -> PRISMATIC")
+            self.joint_type = "prismatic"
+            self.joint_params = {
+                "axis": pris_axis,
+                "error": pris_error,
+            }
+            return self.joint_type, self.joint_params
+
+        # Heuristic 2: if total motion is too small, default to prismatic
+        traj_range = np.ptp(trajectory, axis=0)  # peak-to-peak per coordinate
+        max_range = float(np.max(traj_range))  # max extent in any axis
+        print(f"[InteractivePerception] Trajectory max range: {max_range:.3f} m")
+        if max_range < self.small_motion_threshold:
+            print(f"[InteractivePerception] Small motion (< {self.small_motion_threshold} m) -> PRISMATIC")
+            self.joint_type = "prismatic"
+            self.joint_params = {
+                "axis": pris_axis,
+                "error": pris_error,
+            }
+            return self.joint_type, self.joint_params
+
+        # Heuristic 3: revolute must be significantly better than prismatic
+        if rev_error < self.revolute_better_factor * pris_error:
+            print("[InteractivePerception] Revolute significantly better -> REVOLUTE")
+            self.joint_type = "revolute"
+            self.joint_params = {
+                "axis": rev_axis,
+                "center": rev_center,
+                "radius": rev_radius,
+                "error": rev_error,
+            }
         else:
-            raise ValueError(f"Unknown joint type: {self.joint_type}")
-        
-        return state.astype(np.float32)
+            print("[InteractivePerception] Revolute not clearly better -> PRISMATIC")
+            self.joint_type = "prismatic"
+            self.joint_params = {
+                "axis": pris_axis,
+                "error": pris_error,
+            }
+
+        return self.joint_type, self.joint_params
+
+    def plot_trajectory_with_fits(
+        self,
+        trajectory,
+        num_circle_pts=200,
+        show=False,
+        save_path=None,
+        ax=None,
+    ):
+        """
+        Plot trajectory points with both prismatic (line) and revolute (circle) fits.
+
+        Args:
+            trajectory: (N, 3) array of 3D EE positions.
+            num_circle_pts: number of samples used to draw the fitted circle.
+            show: whether to call plt.show().
+            save_path: optional filepath to save the figure; defaults to a local PNG.
+            ax: optional matplotlib 3D axis to draw into.
+
+        Returns:
+            (fig, ax): matplotlib figure and axis.
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError("matplotlib is required for plotting.") from exc
+
+        trajectory = np.asarray(trajectory)
+        if trajectory.shape[0] < 2:
+            raise ValueError("Need at least 2 points to plot.")
+
+        # Prismatic fit: line through centroid along principal axis
+        pris_error, pris_axis = self.prismatic_error_analysis(trajectory)
+        centroid = np.mean(trajectory, axis=0)
+        proj_scalars = (trajectory - centroid) @ pris_axis
+        line_min = centroid + pris_axis * proj_scalars.min()
+        line_max = centroid + pris_axis * proj_scalars.max()
+        line_pts = np.vstack([line_min, line_max])
+
+        # 2D circle fit (preferred over revolute fit for plotting)
+        model_2d, conf_2d = self.fit_model_2d(trajectory[:, :2])
+        circle_pts = None
+        circle_label = None
+        if model_2d[0] == "CIRCULAR":
+            center_xy = model_2d[1]["center"]
+            radius = model_2d[1]["radius"]
+            z_plane = float(np.mean(trajectory[:, 2]))
+            t = np.linspace(0.0, 2.0 * np.pi, num_circle_pts)
+            circle_xy = center_xy + radius * np.column_stack([np.cos(t), np.sin(t)])
+            circle_pts = np.column_stack([circle_xy, np.full(num_circle_pts, z_plane)])
+            circle_label = f"circle fit 2d (conf={conf_2d:.2f})"
+
+        if ax is None:
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection="3d")
+        else:
+            fig = ax.figure
+
+        ax.scatter(trajectory[:, 0], trajectory[:, 1], trajectory[:, 2], s=12, label="trajectory")
+        ax.plot(line_pts[:, 0], line_pts[:, 1], line_pts[:, 2], "r-", label=f"line fit (mse={pris_error:.2e})")
+        if circle_pts is not None:
+            ax.plot(circle_pts[:, 0], circle_pts[:, 1], circle_pts[:, 2], "g-", label=circle_label)
+
+        # Match axis scales for a sensible 3D view
+        mins = trajectory.min(axis=0)
+        maxs = trajectory.max(axis=0)
+        center = (mins + maxs) / 2.0
+        span = max(maxs - mins)
+        if span > 0:
+            half = span / 2.0
+            ax.set_xlim(center[0] - half, center[0] + half)
+            ax.set_ylim(center[1] - half, center[1] + half)
+            ax.set_zlim(center[2] - half, center[2] + half)
+
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.legend()
+
+        if save_path is None:
+            save_path = "interactive_perception_fits.png"
+        fig.savefig(save_path, bbox_inches="tight")
+        if show:
+            plt.show()
+
+        return fig, ax
+
+    # def analyze_trajectory_and_estimate_joint(self, trajectory):
+    #     """
+    #     Analyze trajectory to estimate joint type and parameters.
+    #
+    #     Args:
+    #         trajectory: Array of positions [N x 3]
+    #
+    #     Returns:
+    #         tuple: (joint_type, joint_params)
+    #     """
+    #     # Calculate errors for both joint types
+    #     prismatic_error, prismatic_axis = self.prismatic_error_analysis(trajectory)
+    #     revolute_error, revolute_center, revolute_radius, revolute_axis = self.revolute_error_analysis(trajectory)
+    #
+    #     print(f"Prismatic error: {prismatic_error:.6f}")
+    #     print(f"Revolute error: {revolute_error:.6f}")
+    #
+    #     # add override based on the estimated max radius
+    #     # if revolute_radius > 1.0:
+    #     #     print (f"Revolute radius {revolute_radius:.2f}m too large -- interpreting it as prismatic")
+    #     #     self.joint_type = "prismatic"
+    #     #     self.joint_params = {"axis": prismatic_axis, "error": prismatic_error}
+    #     #     return self.joint_type, self.joint_params
+    #
+    #     # Select joint type based on lower error
+    #     # if prismatic_error < revolute_error:
+    #     if revolute_error > 0.00000:
+    #         self.joint_type = "prismatic"
+    #         self.joint_params = {"axis": prismatic_axis, "error": prismatic_error}
+    #         print("Estimated joint type: PRISMATIC")
+    #     else:
+    #         self.joint_type = "revolute"
+    #         self.joint_params = {
+    #             "center": revolute_center,
+    #             "radius": revolute_radius,
+    #             "axis": revolute_axis,
+    #             "error": revolute_error
+    #         }
+    #         print("Estimated joint type: REVOLUTE")
+    #
+    #     return self.joint_type, self.joint_params
+    #
+    # def construct_state_vector(self, current_position, initial_position):
+    #     if self.joint_params is None:
+    #         raise ValueError("Must analyze trajectory first!")
+    #
+    #     joint_axis = self.joint_params["axis"]
+    #     joint_axis = joint_axis / np.linalg.norm(joint_axis)
+    #
+    #     if self.joint_type == "prismatic":
+    #         # Prismatic: [hp, Δpt]
+    #         displacement = current_position - initial_position
+    #         state = np.concatenate([joint_axis, displacement])
+    #
+    #     elif self.joint_type == "revolute":
+    #         # Revolute: [hr, vt]
+    #         # vt = (pt - pr) - [(pt - pr)·hr]hr
+    #         joint_center = self.joint_params["center"]  # pr
+    #         vector_to_point = current_position - joint_center  # pt - pr
+    #
+    #         # Project onto plane perpendicular to rotation axis
+    #         projection_on_axis = np.dot(vector_to_point, joint_axis) * joint_axis
+    #         vt = vector_to_point - projection_on_axis
+    #
+    #         state = np.concatenate([joint_axis, vt])
+    #
+    #     else:
+    #         raise ValueError(f"Unknown joint type: {self.joint_type}")
+    #
+    #     return state.astype(np.float32)
     
     def estimate_box_center_from_grasp(self, gripper_pos, grasp_strategy, box_dimensions, current_yaw):
         """
