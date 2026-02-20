@@ -10,50 +10,13 @@ from collections import deque
 
 import numpy as np
 import torch
-import gymnasium as gym
 
 from env import SimplePathFollowingEnv
 from td3 import TD3, ReplayBuffer
-
 from torch.utils.tensorboard import SummaryWriter
 
 
-def random_arc_generalization_test(env, agent, rng, episodes=100):
-    successes = 0
-    for _ in range(episodes):
-        r = rng.uniform(1.0, 2.0)
-        theta0 = rng.uniform(-np.pi / 2, 0)
-        theta1 = rng.uniform(0, np.pi / 2)
-        env.test_full_arc = True
-        env.arc_radius = r
-        env.arc_start = theta0
-        env.arc_end = theta1
-        env.segment_length = None
-        state, _ = env.reset()
-        done = False
-        while True:
-            action = agent.select_action(np.array(state)).squeeze(0)
-            state, _, done, truncated, info = env.step(action)
-            if done or truncated:
-                if info["terminal_event"] == "success":
-                    successes += 1
-                break
-    return successes / episodes
-
-
 def test_policy(env, agent, num_episodes=20, render=False):
-    """
-    Test the policy for a specified number of episodes and return statistics.
-
-    Args:
-        env: The environment to test in
-        agent: The agent/policy to test
-        num_episodes: Number of episodes to run
-        render: Whether to render the environment during testing
-
-    Returns:
-        dict: Statistics about the test run
-    """
     total_reward = 0.0
     successes = 0
     total_steps_mdp = 0
@@ -93,16 +56,93 @@ def test_policy(env, agent, num_episodes=20, render=False):
     }
 
 
+def random_arc_generalization_test(env, agent, rng, episodes=100):
+    successes = 0
+    for _ in range(episodes):
+        r = rng.uniform(1.0, 2.0)
+        theta0 = rng.uniform(-np.pi / 2, 0)
+        theta1 = rng.uniform(0, np.pi / 2)
+        env.test_full_arc = True
+        env.arc_radius = r
+        env.arc_start = theta0
+        env.arc_end = theta1
+        env.segment_length = None
+        state, _ = env.reset()
+        while True:
+            action = agent.select_action(np.array(state)).squeeze(0)
+            state, _, done, truncated, info = env.step(action)
+            if done or truncated:
+                if info["terminal_event"] == "success":
+                    successes += 1
+                break
+    return successes / episodes
+
+
+def prefill_replay_buffer(env, agent, replay_buffer, num_episodes, exploration_noise,
+                           action_dim, rng_exploration, seed):
+    """
+    Roll out the loaded policy (with exploration noise) to pre-fill the replay buffer.
+    This gives the resumed training meaningful transitions from the start.
+    """
+    print(f"  Pre-filling replay buffer with {num_episodes} episodes using loaded policy...")
+    env.reset(seed=seed)
+    total_transitions = 0
+
+    for ep in range(num_episodes):
+        with contextlib.redirect_stdout(io.StringIO()):
+            state, _ = env.reset()
+        done = False
+
+        while True:
+            action = agent.select_action(np.array(state)).squeeze(0)
+            noise = rng_exploration.normal(0, exploration_noise, size=action_dim)
+            action = np.clip(action + noise, env.action_space.low, env.action_space.high)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                next_state, reward, done, truncated, info = env.step(action)
+
+            replay_buffer.add((state, action, reward, next_state, float(done)))
+            state = next_state
+            total_transitions += 1
+
+            if done or truncated:
+                break
+
+    print(f"  Pre-fill complete: {total_transitions} transitions added "
+          f"(buffer size: {replay_buffer.size}).")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Train a TD3 agent on the Environment")
+    parser = argparse.ArgumentParser(description="Resume TD3 training from a checkpoint")
+
+    # --- Resume-specific arguments ---
+    parser.add_argument("--run_dir", type=str, required=True,
+                        help="Path to the original run directory (e.g. runs/run-0-2024-01-01_12-00-00)")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Checkpoint name to load (e.g. checkpoint_ep500, best_model, final_model)")
+    parser.add_argument("--resume_episode", type=int, required=True,
+                        help="Episode number to resume FROM (e.g. 500 if loading checkpoint_ep500)")
+    parser.add_argument("--prefill_episodes", type=int, default=200,
+                        help="Number of episodes to pre-fill replay buffer with loaded policy")
+
+    # --- Standard arguments (same as train.py) ---
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
-    parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
-    parser.add_argument("--render_test", action="store_true", help="Render environment during testing")
-    parser.add_argument("--test_episodes", type=int, default=20, help="Number of episodes to test on")
-    parser.add_argument("--test_freq", type=int, default=50, help="Test policy every n episodes")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to config file. Defaults to config.yaml inside --run_dir")
+    parser.add_argument("--render_test", action="store_true", help="Render during testing")
+    parser.add_argument("--test_episodes", type=int, default=20, help="Episodes per eval")
+    parser.add_argument("--test_freq", type=int, default=50, help="Eval every n episodes")
+    parser.add_argument("--total_episodes", type=int, default=None,
+                    help="Total episodes to run to. Overrides config value. "
+                         "e.g. --total_episodes 4000 runs 3000 more from ep1000")
+
     args = parser.parse_args()
 
-    with open(args.config, "r") as f:
+    # --- Load config: prefer the one saved in the run dir for consistency ---
+    config_path = args.config if args.config else os.path.join(args.run_dir, "config.yaml")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config not found at: {config_path}")
+    with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
     env_cfg = config["env"]
@@ -119,7 +159,7 @@ def main():
 
     curriculum_cfg = training_cfg.get("curriculum", None)
 
-    # Set random seeds for reproducibility
+    # --- Reproducibility ---
     seed = args.seed
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.use_deterministic_algorithms(True)
@@ -141,12 +181,11 @@ def main():
     dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     torch_rng = torch.Generator(device=dev).manual_seed(seed + 40)
 
-    # Create timestamped run directory
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name = f"run-{seed}-{timestamp}"
-    runs_dir = "runs"
-    run_dir = os.path.join(runs_dir, run_name)
-    os.makedirs(run_dir, exist_ok=True)
+    # --- Append to the original run folder ---
+    run_dir = args.run_dir
+    if not os.path.isdir(run_dir):
+        raise NotADirectoryError(f"Run directory not found: {run_dir}")
+
     models_dir = os.path.join(run_dir, "models")
     logs_dir = os.path.join(run_dir, "logs")
     data_dir = os.path.join(run_dir, "data")
@@ -154,18 +193,15 @@ def main():
     os.makedirs(logs_dir, exist_ok=True)
     os.makedirs(data_dir, exist_ok=True)
 
-    with open(os.path.join(run_dir, "config.yaml"), "w") as f:
-        yaml.dump(config, f)
-    with open(os.path.join(run_dir, "args.yaml"), "w") as f:
+    # Save resume args alongside original config
+    resume_args_path = os.path.join(run_dir, f"resume_args_{args.checkpoint}.yaml")
+    with open(resume_args_path, "w") as f:
         yaml.dump(vars(args), f)
 
+    # TensorBoard appends to the same logs dir — steps are continuous so graphs connect
     writer = SummaryWriter(logs_dir)
 
-    start_time = time.perf_counter()
-    last_mark_time = start_time
-    milestone = 10_000
-    next_mark = milestone
-
+    # --- Environments ---
     env = SimplePathFollowingEnv(**env_cfg)
 
     train_mode = training_cfg.get("train_segment_mode", "short").lower()
@@ -199,6 +235,7 @@ def main():
     action_dim = env.action_space.shape[0]
     max_action = env.action_space.high[0]
 
+    # --- Agent ---
     agent = TD3(
         lr=agent_cfg.get("lr", 1e-3),
         state_dim=state_dim,
@@ -207,14 +244,46 @@ def main():
         max_torque=env_cfg.get("max_torque", 50.0),
         torch_rng=torch_rng
     )
+
+    # --- Load checkpoint ---
+    checkpoint_path = os.path.join(models_dir, args.checkpoint)
+    if not os.path.exists(checkpoint_path + "_actor.pth"):
+        raise FileNotFoundError(
+            f"Checkpoint not found at: {checkpoint_path}_actor.pth\n"
+            f"Make sure --checkpoint matches a saved model name (without extension)."
+        )
+    agent.load(models_dir, args.checkpoint)
+    print(f"Loaded checkpoint: {checkpoint_path}")
+
+    # --- Replay buffer ---
     replay_buffer = ReplayBuffer(
         max_size=agent_cfg.get("replay_buffer_max_size", 5e5),
         rng=rng_replay
     )
 
-    # Training parameters
-    episodes = training_cfg.get("episodes", 1000)
-    start_timesteps = training_cfg.get("start_timesteps", 200)
+    # Pre-fill replay buffer by rolling out the loaded policy
+    prefill_env_cfg = env_cfg.copy()
+    prefill_env_cfg['gui'] = False
+    prefill_env = SimplePathFollowingEnv(**prefill_env_cfg)
+    prefill_env.segment_length = env.segment_length
+    prefill_env.action_space.seed(seed + 999)
+    prefill_env.observation_space.seed(seed + 998)
+
+    prefill_replay_buffer(
+        env=prefill_env,
+        agent=agent,
+        replay_buffer=replay_buffer,
+        num_episodes=args.prefill_episodes,
+        exploration_noise=agent_cfg.get("exploration_noise", 0.1),
+        action_dim=action_dim,
+        rng_exploration=rng_exploration,
+        seed=seed + 500,
+    )
+    prefill_env.close()
+
+    # --- Training parameters ---
+    # episodes = training_cfg.get("episodes", 1000)
+    episodes = args.total_episodes if args.total_episodes is not None else training_cfg.get("episodes", 1000)
     batch_size = agent_cfg.get("batch_size", 100)
     gamma = agent_cfg.get("gamma", 0.99)
     polyak = agent_cfg.get("polyak", 0.995)
@@ -224,17 +293,35 @@ def main():
     n_iter = agent_cfg.get("n_iter", 1)
     exploration_noise = agent_cfg.get("exploration_noise", 0.1)
 
-    total_steps = 0
+    # Resume from the given episode; total_steps estimated from resume_episode
+    start_ep = args.resume_episode
+    # Estimate total_steps so TensorBoard x-axis is continuous.
+    # We don't know exact step count so we approximate: use average of 100 steps/ep
+    # as a safe lower-bound. If your runs logged steps you can replace this.
+    avg_steps_per_ep = training_cfg.get("avg_steps_per_ep_estimate", 100)
+    total_steps = start_ep * avg_steps_per_ep
+
     best_full_success = 0.0
     eval_phase = 1
     eval_interval = eval_stage1_interval
-    next_eval_ep = 0
+    next_eval_ep = start_ep  # evaluate immediately on resume so we have a baseline
 
     stage1_streak = 0
     full_succ_hist = deque(maxlen=eval_stage2_window)
 
-    for ep in range(episodes):
-        # Curriculum: override segment_length if configured
+    start_time = time.perf_counter()
+    last_mark_time = start_time
+    milestone = 10_000
+    next_mark = total_steps + milestone
+
+    print(f"\n=== Resuming from episode {start_ep} / {episodes} ===")
+    print(f"    Checkpoint : {args.checkpoint}")
+    print(f"    Run dir    : {run_dir}")
+    print(f"    Buffer size: {replay_buffer.size}")
+    print(f"    Device     : {dev}\n")
+
+    for ep in range(start_ep, episodes):
+        # Curriculum override
         if curriculum_cfg is not None:
             for tier in curriculum_cfg:
                 if ep <= tier["until"]:
@@ -250,12 +337,10 @@ def main():
             total_steps += 1
             ep_steps += 1
 
-            if total_steps < start_timesteps:
-                action = env.action_space.sample()
-            else:
-                action = agent.select_action(state).squeeze(0)
-                noise = rng_exploration.normal(0, exploration_noise, size=action_dim)
-                action = np.clip(action + noise, env.action_space.low, env.action_space.high)
+            # No random warm-up on resume — buffer is already pre-filled
+            action = agent.select_action(state).squeeze(0)
+            noise = rng_exploration.normal(0, exploration_noise, size=action_dim)
+            action = np.clip(action + noise, env.action_space.low, env.action_space.high)
 
             with contextlib.redirect_stdout(io.StringIO()):
                 next_state, reward, done, truncated, info = env.step(action)
@@ -282,7 +367,6 @@ def main():
             state = next_state
             ep_reward += reward
 
-            # TD3 update
             if replay_buffer.size > batch_size:
                 agent.update(
                     replay_buffer,
@@ -298,6 +382,7 @@ def main():
             if episode_over:
                 break
 
+        writer.add_scalar("Train/EpisodeReward", ep_reward, total_steps)
         print(f"[Ep {ep:4d}] Train Reward: {ep_reward:.2f}")
 
         # Periodic evaluation
@@ -365,8 +450,7 @@ def main():
                 else:
                     next_eval_ep = ep + eval_interval
 
-        # Periodic checkpointing
-        if ep % training_cfg.get("save_freq", 2000) == 0:
+        if ep % training_cfg.get("save_freq", 2000) == 0 or ep == episodes - 1:
             agent.save(models_dir, f"checkpoint_ep{ep}")
 
     # --- Final Evaluation ---
@@ -382,7 +466,7 @@ def main():
     print(f"FINAL FULL-ARC:  Reward={final_full['avg_reward']:.2f}, "
           f"Success={final_full['success_rate']:.2f}")
 
-    agent.save(models_dir, "final_model")
+    agent.save(models_dir, "final_model_resumed")
 
     gen_rate = random_arc_generalization_test(
         test_env_full, agent, rng=rng_generalization_test, episodes=100
