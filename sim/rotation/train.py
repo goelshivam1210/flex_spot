@@ -10,7 +10,6 @@ from collections import deque
 
 import numpy as np
 import torch
-import gymnasium as gym
 
 from env import SimplePathFollowingEnv
 from td3 import TD3, ReplayBuffer
@@ -18,108 +17,158 @@ from td3 import TD3, ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
 
-def random_arc_generalization_test(env, agent, rng, episodes=100):
-    successes = 0
-    for _ in range(episodes):
-        r = rng.uniform(1.0, 2.0)
+def run_eval(env_short, env_full, env_gen, agent, num_episodes, rng_gen):
+    """
+    Unified evaluation across all three test types.
+    Mass and friction are randomized per episode via env.reset() domain randomization.
+    Arc direction is flipped 50% of the time via env.reset() for all envs.
+    Random-arc trials additionally randomize geometry and direction.
+    """
+    return {
+        "short": _eval_env(env_short, agent, num_episodes),
+        "full":  _eval_env(env_full,  agent, num_episodes),
+        "gen":   _eval_random_arc(env_gen, agent, num_episodes, rng_gen),
+    }
+
+
+def _eval_env(env, agent, num_episodes):
+    """Run fixed-geometry eval (short-seg or full-arc)."""
+    env._reverse_path = False  # ensure no bleed from random arc eval
+    total_reward  = 0.0
+    successes     = 0
+    total_steps   = 0
+    total_deviation = 0.0
+    terminal_counts = {"success": 0, "wandered_off": 0, "orient_fail": 0, "truncated": 0}
+
+    for _ in range(num_episodes):
+        state, _ = env.reset()
+        ep_reward    = 0.0
+        ep_steps     = 0
+        ep_deviation = 0.0
+
+        while True:
+            action = agent.select_action(np.array(state)).squeeze(0)
+            state, reward, done, truncated, info = env.step(action)
+            ep_reward    += reward
+            ep_steps     += 1
+            ep_deviation += float(info["deviation"])
+
+            if done or truncated:
+                event = info["terminal_event"] if info["terminal_event"] else "truncated"
+                terminal_counts[event] = terminal_counts.get(event, 0) + 1
+                if info["terminal_event"] == "success":
+                    successes += 1
+                break
+
+        total_reward    += ep_reward
+        total_steps     += ep_steps
+        total_deviation += ep_deviation / max(ep_steps, 1)
+
+    n = num_episodes
+    return {
+        "avg_reward":      total_reward / n,
+        "success_rate":    successes / n,
+        "avg_steps":       total_steps / n,
+        "avg_deviation":   total_deviation / n,
+        "terminal_counts": terminal_counts,
+    }
+
+
+def _eval_random_arc(env, agent, num_episodes, rng):
+    """
+    Random-arc generalization eval.
+    Each episode samples a new arc geometry and randomly flips direction.
+    """
+    total_reward    = 0.0
+    successes       = 0
+    total_steps     = 0
+    total_deviation = 0.0
+    terminal_counts = {"success": 0, "wandered_off": 0, "orient_fail": 0, "truncated": 0}
+
+    for _ in range(num_episodes):
+        # Sample random arc geometry
+        r      = rng.uniform(1.0, 2.0)
         theta0 = rng.uniform(-np.pi / 2, 0)
         theta1 = rng.uniform(0, np.pi / 2)
-        env.test_full_arc = True
-        env.arc_radius = r
-        env.arc_start = theta0
-        env.arc_end = theta1
+
+        env.test_full_arc  = True
+        env.arc_radius     = r
+        env.arc_start      = theta0
+        env.arc_end        = theta1
         env.segment_length = None
+        # Reverse traversal direction 50% of the time — same geometry, opposite direction
+        env._reverse_path  = rng.random() > 0.5
+
         state, _ = env.reset()
-        done = False
-        while True:
-            action = agent.select_action(np.array(state)).squeeze(0)
-            state, _, done, truncated, info = env.step(action)
-            if done or truncated:
-                if info["terminal_event"] == "success":
-                    successes += 1
-                break
-    return successes / episodes
-
-
-def test_policy(env, agent, num_episodes=20, render=False):
-    """
-    Test the policy for a specified number of episodes and return statistics.
-
-    Args:
-        env: The environment to test in
-        agent: The agent/policy to test
-        num_episodes: Number of episodes to run
-        render: Whether to render the environment during testing
-
-    Returns:
-        dict: Statistics about the test run
-    """
-    total_reward = 0.0
-    successes = 0
-    total_steps_mdp = 0
-    total_dev_sum = 0.0
-
-    for ep in range(num_episodes):
-        state, _ = env.reset()
-        ep_reward = 0.0
-        ep_steps = 0
-        ep_dev_sum = 0.0
+        ep_reward    = 0.0
+        ep_steps     = 0
+        ep_deviation = 0.0
 
         while True:
             action = agent.select_action(np.array(state)).squeeze(0)
-            next_state, reward, done, truncated, info = env.step(action)
-            state = next_state
-            ep_reward += reward
-            ep_steps += 1
-            ep_dev_sum += float(info["deviation"])
-
-            if render:
-                env.render()
+            state, reward, done, truncated, info = env.step(action)
+            ep_reward    += reward
+            ep_steps     += 1
+            ep_deviation += float(info["deviation"])
 
             if done or truncated:
+                event = info["terminal_event"] if info["terminal_event"] else "truncated"
+                terminal_counts[event] = terminal_counts.get(event, 0) + 1
                 if info["terminal_event"] == "success":
                     successes += 1
                 break
 
-        total_reward += ep_reward
-        total_steps_mdp += ep_steps
-        total_dev_sum += ep_dev_sum
+        total_reward    += ep_reward
+        total_steps     += ep_steps
+        total_deviation += ep_deviation / max(ep_steps, 1)
 
+    n = num_episodes
     return {
-        "avg_reward": total_reward / num_episodes,
-        "success_rate": successes / num_episodes,
-        "avg_steps": total_steps_mdp / num_episodes,
-        "avg_deviation_sum": total_dev_sum / num_episodes,
+        "avg_reward":      total_reward / n,
+        "success_rate":    successes / n,
+        "avg_steps":       total_steps / n,
+        "avg_deviation":   total_deviation / n,
+        "terminal_counts": terminal_counts,
     }
+
+
+def log_eval_to_tb(writer, results, total_steps):
+    """Write all eval metrics to TensorBoard under clean namespaces."""
+    for tag, stats in [("Eval/Short", results["short"]),
+                       ("Eval/Full",  results["full"]),
+                       ("Eval/Gen",   results["gen"])]:
+        writer.add_scalar(f"{tag}/SuccessRate",  stats["success_rate"],  total_steps)
+        writer.add_scalar(f"{tag}/AvgReward",    stats["avg_reward"],    total_steps)
+        writer.add_scalar(f"{tag}/AvgSteps",     stats["avg_steps"],     total_steps)
+        writer.add_scalar(f"{tag}/AvgDeviation", stats["avg_deviation"], total_steps)
+
+        tc = stats["terminal_counts"]
+        n  = max(sum(tc.values()), 1)
+        writer.add_scalar(f"{tag}/Terminal/Success",     tc.get("success",     0) / n, total_steps)
+        writer.add_scalar(f"{tag}/Terminal/WanderedOff", tc.get("wandered_off",0) / n, total_steps)
+        writer.add_scalar(f"{tag}/Terminal/OrientFail",  tc.get("orient_fail", 0) / n, total_steps)
+        writer.add_scalar(f"{tag}/Terminal/Truncated",   tc.get("truncated",   0) / n, total_steps)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train a TD3 agent on the Environment")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed")
-    parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
-    parser.add_argument("--render_test", action="store_true", help="Render environment during testing")
-    parser.add_argument("--test_episodes", type=int, default=20, help="Number of episodes to test on")
-    parser.add_argument("--test_freq", type=int, default=50, help="Test policy every n episodes")
+    parser.add_argument("--seed",          type=int,  default=0,             help="Random seed")
+    parser.add_argument("--config",        type=str,  default="config.yaml", help="Path to config file")
+    parser.add_argument("--render_test",   action="store_true",              help="Render during testing")
+    parser.add_argument("--test_episodes", type=int,  default=25,            help="Episodes per eval")
+    parser.add_argument("--eval_freq",     type=int,  default=25,            help="Eval every N episodes")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
-    env_cfg = config["env"]
-    agent_cfg = config["agent"]
+    env_cfg      = config["env"]
+    agent_cfg    = config["agent"]
     training_cfg = config["training"]
 
-    eval_stage1_threshold = float(training_cfg.get("stage1_threshold", 0.85))
-    eval_stage1_patience = int(training_cfg.get("stage1_patience", 5))
-    eval_stage1_interval = int(training_cfg.get("stage1_interval", args.test_freq))
+    eval_freq = int(training_cfg.get("eval_freq", args.eval_freq))
 
-    eval_stage2_avg_threshold = float(training_cfg.get("stage2_avg_threshold", 0.90))
-    eval_stage2_window = int(training_cfg.get("stage2_avg_window", 10))
-    eval_stage2_interval = int(training_cfg.get("stage2_interval", 5))
-
-    curriculum_cfg = training_cfg.get("curriculum", None)
-
-    # Set random seeds for reproducibility
+    # Set random seeds
     seed = args.seed
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.use_deterministic_algorithms(True)
@@ -134,25 +183,21 @@ def main():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    rng_replay = np.random.default_rng(seed + 10)
+    rng_replay      = np.random.default_rng(seed + 10)
     rng_exploration = np.random.default_rng(seed + 20)
-    rng_generalization_test = np.random.default_rng(seed + 30)
+    rng_gen         = np.random.default_rng(seed + 30)
 
-    dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    dev       = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     torch_rng = torch.Generator(device=dev).manual_seed(seed + 40)
 
     # Create timestamped run directory
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name = f"run-{seed}-{timestamp}"
-    runs_dir = "runs"
-    run_dir = os.path.join(runs_dir, run_name)
-    os.makedirs(run_dir, exist_ok=True)
+    timestamp  = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_name   = f"run-{seed}-{timestamp}"
+    run_dir    = os.path.join("runs", run_name)
     models_dir = os.path.join(run_dir, "models")
-    logs_dir = os.path.join(run_dir, "logs")
-    data_dir = os.path.join(run_dir, "data")
+    logs_dir   = os.path.join(run_dir, "logs")
     os.makedirs(models_dir, exist_ok=True)
-    os.makedirs(logs_dir, exist_ok=True)
-    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(logs_dir,   exist_ok=True)
 
     with open(os.path.join(run_dir, "config.yaml"), "w") as f:
         yaml.dump(config, f)
@@ -161,13 +206,8 @@ def main():
 
     writer = SummaryWriter(logs_dir)
 
-    start_time = time.perf_counter()
-    last_mark_time = start_time
-    milestone = 10_000
-    next_mark = milestone
-
+    # --- Training env ---
     env = SimplePathFollowingEnv(**env_cfg)
-
     train_mode = training_cfg.get("train_segment_mode", "short").lower()
     if train_mode == "short":
         env.segment_length = env_cfg.get("short_segment_length", 0.3)
@@ -175,32 +215,41 @@ def main():
         env.segment_length = None
     else:
         raise ValueError(f"Unknown train_segment_mode: {train_mode}")
-
     env.reset(seed=seed)
 
+    # --- Short-seg eval env ---
+    test_env_short_cfg = env_cfg.copy()
+    test_env_short_cfg['gui'] = False
+    test_env_short_cfg['segment_length'] = env_cfg.get('short_segment_length', 0.3)
+    test_env_short = SimplePathFollowingEnv(**test_env_short_cfg)
+    test_env_short.reset(seed=seed + 1)
+
+    # --- Full-arc eval env ---
     test_env_full_cfg = env_cfg.copy()
-    test_env_full_cfg['gui'] = args.render_test
+    test_env_full_cfg['gui'] = False
     test_env_full_cfg['max_steps'] = 1000
     test_env_full_cfg['segment_length'] = None
     test_env_full = SimplePathFollowingEnv(**test_env_full_cfg)
-    test_env_full.reset(seed=seed + 1)
+    test_env_full.reset(seed=seed + 2)
 
-    test_env_short_cfg = env_cfg.copy()
-    test_env_short_cfg['gui'] = args.render_test
-    test_env_short_cfg['segment_length'] = env_cfg.get('short_segment_length', 0.3)
-    test_env_short = SimplePathFollowingEnv(**test_env_short_cfg)
-    test_env_short.reset(seed=seed + 2)
+    # --- Random-arc generalization eval env ---
+    test_env_gen_cfg = env_cfg.copy()
+    test_env_gen_cfg['gui'] = False
+    test_env_gen_cfg['max_steps'] = 1000
+    test_env_gen_cfg['segment_length'] = None
+    test_env_gen = SimplePathFollowingEnv(**test_env_gen_cfg)
+    test_env_gen.reset(seed=seed + 3)
 
-    for i, e in enumerate([env, test_env_full, test_env_short]):
+    for i, e in enumerate([env, test_env_short, test_env_full, test_env_gen]):
         e.action_space.seed(seed + 100 + i)
         e.observation_space.seed(seed + 200 + i)
 
-    state_dim = env.observation_space.shape[0]
+    state_dim  = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     max_action = env.action_space.high[0]
 
     agent = TD3(
-        lr=agent_cfg.get("lr", 1e-3),
+        lr=agent_cfg.get("lr", 3e-4),
         state_dim=state_dim,
         action_dim=action_dim,
         max_action=max_action,
@@ -212,186 +261,168 @@ def main():
         rng=rng_replay
     )
 
-    # Training parameters
-    episodes = training_cfg.get("episodes", 1000)
-    start_timesteps = training_cfg.get("start_timesteps", 200)
-    batch_size = agent_cfg.get("batch_size", 100)
-    gamma = agent_cfg.get("gamma", 0.99)
-    polyak = agent_cfg.get("polyak", 0.995)
-    policy_noise = agent_cfg.get("policy_noise", 0.2)
-    noise_clip = agent_cfg.get("noise_clip", 0.5)
-    policy_delay = agent_cfg.get("policy_delay", 2)
-    n_iter = agent_cfg.get("n_iter", 1)
+    # Training hyperparameters
+    episodes          = training_cfg.get("episodes", 3000)
+    start_timesteps   = training_cfg.get("start_timesteps", 2000)
+    batch_size        = agent_cfg.get("batch_size", 256)
+    gamma             = agent_cfg.get("gamma", 0.99)
+    polyak            = agent_cfg.get("polyak", 0.99)
+    policy_noise      = agent_cfg.get("policy_noise", 0.2)
+    noise_clip        = agent_cfg.get("noise_clip", 0.5)
+    policy_delay      = agent_cfg.get("policy_delay", 2)
+    n_iter            = agent_cfg.get("n_iter", 2)
     exploration_noise = agent_cfg.get("exploration_noise", 0.1)
+    save_freq         = training_cfg.get("save_freq", 500)
 
-    total_steps = 0
+    total_steps       = 0
     best_full_success = 0.0
-    eval_phase = 1
-    eval_interval = eval_stage1_interval
-    next_eval_ep = 0
+    next_eval_ep      = 0
 
-    stage1_streak = 0
-    full_succ_hist = deque(maxlen=eval_stage2_window)
+    # Rolling train reward for smoothed TensorBoard signal
+    train_reward_hist = deque(maxlen=100)
+
+    # Timing
+    start_time     = time.perf_counter()
+    last_mark_time = start_time
+    milestone      = 10_000
+    next_mark      = milestone
 
     for ep in range(episodes):
-        # Curriculum: override segment_length if configured
-        if curriculum_cfg is not None:
-            for tier in curriculum_cfg:
-                if ep <= tier["until"]:
-                    env.segment_length = tier["segment"] if tier["segment"] is not None else None
-                    break
-
         with contextlib.redirect_stdout(io.StringIO()):
             state, _ = env.reset()
-        ep_reward = 0.0
-        ep_steps = 0
+
+        ep_reward       = 0.0
+        ep_steps        = 0
+        ep_reward_comps = {"R_Progress": 0.0, "R_Speed": 0.0,
+                           "R_Constraint_Lat": 0.0, "R_Constraint_Ori": 0.0,
+                           "R_Eff_Spin": 0.0}
+        terminal_event  = None
 
         while True:
             total_steps += 1
-            ep_steps += 1
+            ep_steps    += 1
 
             if total_steps < start_timesteps:
                 action = env.action_space.sample()
             else:
                 action = agent.select_action(state).squeeze(0)
-                noise = rng_exploration.normal(0, exploration_noise, size=action_dim)
+                noise  = rng_exploration.normal(0, exploration_noise, size=action_dim)
                 action = np.clip(action + noise, env.action_space.low, env.action_space.high)
 
             with contextlib.redirect_stdout(io.StringIO()):
                 next_state, reward, done, truncated, info = env.step(action)
 
-            # Time-based logging
+            for k in ep_reward_comps:
+                ep_reward_comps[k] += info["reward_comps"].get(k, 0.0)
+            terminal_event = info["terminal_event"]
+
+            # Time milestone logging
             if total_steps >= next_mark:
-                now = time.perf_counter()
-                elapsed_total = now - start_time
+                now            = time.perf_counter()
+                elapsed_total  = now - start_time
                 elapsed_window = now - last_mark_time
-                writer.add_scalar("Time/ElapsedSec", elapsed_total, total_steps)
+                writer.add_scalar("Time/ElapsedSec",
+                                  elapsed_total, total_steps)
                 writer.add_scalar("Time/StepsPerSecWindow",
                                   milestone / max(elapsed_window, 1e-9), total_steps)
                 writer.add_scalar("Time/StepsPerSecCumulative",
                                   total_steps / max(elapsed_total, 1e-9), total_steps)
-                writer.add_scalar("Time/UnixTime", time.time(), total_steps)
                 print(f"[Time] {total_steps} steps — {elapsed_total:.1f}s total, "
-                      f"{elapsed_window:.1f}s last {milestone}, "
-                      f"{milestone / elapsed_window:.1f} steps/s window")
+                      f"{milestone / elapsed_window:.1f} steps/s")
                 last_mark_time = now
-                next_mark += milestone
+                next_mark     += milestone
 
             episode_over = done or truncated
             replay_buffer.add((state, action, reward, next_state, float(done)))
-            state = next_state
+            state      = next_state
             ep_reward += reward
 
-            # TD3 update
             if replay_buffer.size > batch_size:
-                agent.update(
-                    replay_buffer,
-                    n_iter,
-                    batch_size,
-                    gamma,
-                    polyak,
-                    policy_noise,
-                    noise_clip,
-                    policy_delay
-                )
+                agent.update(replay_buffer, n_iter, batch_size, gamma,
+                             polyak, policy_noise, noise_clip, policy_delay)
 
             if episode_over:
                 break
 
-        print(f"[Ep {ep:4d}] Train Reward: {ep_reward:.2f}")
+        # --- Per-episode TensorBoard logging ---
+        train_reward_hist.append(ep_reward)
+        rolling_reward = sum(train_reward_hist) / len(train_reward_hist)
 
-        # Periodic evaluation
+        writer.add_scalar("Train/EpisodeReward",    ep_reward,      total_steps)
+        writer.add_scalar("Train/RollingReward100", rolling_reward, total_steps)
+        writer.add_scalar("Train/EpisodeLength",    ep_steps,       total_steps)
+        writer.add_scalar("Train/Env/Mass",         info["sampled_mass"],     total_steps)
+        writer.add_scalar("Train/Env/Friction",     info["sampled_friction"], total_steps)
+
+        # Reward components as per-step averages
+        for k, v in ep_reward_comps.items():
+            writer.add_scalar(f"Train/RewardComps/{k}", v / max(ep_steps, 1), total_steps)
+
+        # Terminal event flags
+        writer.add_scalar("Train/Terminal/Success",
+                          1.0 if terminal_event == "success"      else 0.0, total_steps)
+        writer.add_scalar("Train/Terminal/WanderedOff",
+                          1.0 if terminal_event == "wandered_off" else 0.0, total_steps)
+        writer.add_scalar("Train/Terminal/Truncated",
+                          1.0 if (terminal_event is None and truncated) else 0.0, total_steps)
+
+        print(f"[Ep {ep:4d}] Reward: {ep_reward:.2f} | "
+              f"Rolling100: {rolling_reward:.2f} | "
+              f"Steps: {ep_steps} | "
+              f"Terminal: {terminal_event}")
+
+        # --- Periodic unified evaluation ---
         if ep >= next_eval_ep:
-            short_stats = test_policy(test_env_short, agent,
-                                      num_episodes=args.test_episodes,
-                                      render=args.render_test)
-            full_stats = test_policy(test_env_full, agent,
-                                     num_episodes=args.test_episodes,
-                                     render=args.render_test)
+            print(f"\n--- Eval at ep {ep} (total_steps={total_steps}) ---")
+            eval_results = run_eval(
+                test_env_short, test_env_full, test_env_gen,
+                agent, args.test_episodes, rng_gen
+            )
+            log_eval_to_tb(writer, eval_results, total_steps)
 
-            print(f"  >> Short-seg Success: {short_stats['success_rate']:.2f}, "
-                  f"Full-arc Success: {full_stats['success_rate']:.2f}")
+            short_succ = eval_results["short"]["success_rate"]
+            full_succ  = eval_results["full"]["success_rate"]
+            gen_succ   = eval_results["gen"]["success_rate"]
 
-            writer.add_scalar("Eval/ShortSuccess", short_stats["success_rate"], total_steps)
-            writer.add_scalar("Eval/FullSuccess", full_stats["success_rate"], total_steps)
-            writer.add_scalar("Eval/ShortReward", short_stats["avg_reward"], total_steps)
-            writer.add_scalar("Eval/FullReward", full_stats["avg_reward"], total_steps)
-            writer.add_scalar("Eval/ShortAvgSteps", short_stats["avg_steps"], total_steps)
-            writer.add_scalar("Eval/FullAvgSteps", full_stats["avg_steps"], total_steps)
-            writer.add_scalar("Eval/ShortDevSum", short_stats["avg_deviation_sum"], total_steps)
-            writer.add_scalar("Eval/FullDevSum", full_stats["avg_deviation_sum"], total_steps)
+            print(f"  Short: {short_succ:.2f} | "
+                  f"Full: {full_succ:.2f} | "
+                  f"Gen: {gen_succ:.2f}")
 
-            if full_stats["success_rate"] > best_full_success:
-                best_full_success = full_stats["success_rate"]
+            # Save best full-arc model
+            if full_succ > best_full_success:
+                best_full_success = full_succ
                 agent.save(models_dir, "best_model")
-                print(f" New best full-arc success: {best_full_success:.2f} — model saved")
+                print(f"  New best full-arc: {best_full_success:.2f} — best_model saved")
 
-            if eval_phase == 1:
-                meets = full_stats["success_rate"] >= eval_stage1_threshold
-                stage1_streak = stage1_streak + 1 if meets else 0
+            next_eval_ep = ep + eval_freq
 
-                print(f" [Stage1] streak={stage1_streak}/{eval_stage1_patience} "
-                      f"(threshold={eval_stage1_threshold:.2f})")
-
-                if stage1_streak >= eval_stage1_patience:
-                    eval_phase = 2
-                    eval_interval = eval_stage2_interval
-                    next_eval_ep = ep + eval_interval
-                    stage1_streak = 0
-                    full_succ_hist.clear()
-                    print(f" >>> Switched to Stage 2 eval: "
-                          f"every {eval_interval} episodes; "
-                          f"avg window={eval_stage2_window}; "
-                          f"avg threshold={eval_stage2_avg_threshold:.2f}")
-                else:
-                    next_eval_ep = ep + eval_interval
-
-            elif eval_phase == 2:
-                full_succ_hist.append(full_stats["success_rate"])
-                avg_full = sum(full_succ_hist) / len(full_succ_hist)
-
-                print(f" [Stage2] window={len(full_succ_hist)}/{eval_stage2_window} "
-                      f"avg_full={avg_full:.2f} "
-                      f"(threshold={eval_stage2_avg_threshold:.2f})")
-
-                writer.add_scalar("Eval/FullSuccessMA", avg_full, total_steps)
-
-                if (len(full_succ_hist) == eval_stage2_window and
-                        avg_full >= eval_stage2_avg_threshold):
-                    agent.save(models_dir, "converged_model")
-                    print(f" Early-stop: rolling {eval_stage2_window}-eval average "
-                          f">= {eval_stage2_avg_threshold:.2f} for Full arc. Stopping training.")
-                    break
-                else:
-                    next_eval_ep = ep + eval_interval
-
-        # Periodic checkpointing
-        if ep % training_cfg.get("save_freq", 2000) == 0:
+        # Periodic checkpoint
+        if ep % save_freq == 0 and ep > 0:
             agent.save(models_dir, f"checkpoint_ep{ep}")
+            print(f"  Checkpoint saved at ep {ep}")
 
-    # --- Final Evaluation ---
-    final_short = test_policy(test_env_short, agent,
-                              num_episodes=args.test_episodes * 2,
-                              render=args.render_test)
-    final_full = test_policy(test_env_full, agent,
-                             num_episodes=args.test_episodes * 2,
-                             render=args.render_test)
+    # --- Final evaluation ---
+    print("\n--- Final Evaluation ---")
+    final_results = run_eval(
+        test_env_short, test_env_full, test_env_gen,
+        agent, args.test_episodes * 2, rng_gen
+    )
+    log_eval_to_tb(writer, final_results, total_steps)
 
-    print(f"\nFINAL SHORT-SEG: Reward={final_short['avg_reward']:.2f}, "
-          f"Success={final_short['success_rate']:.2f}")
-    print(f"FINAL FULL-ARC:  Reward={final_full['avg_reward']:.2f}, "
-          f"Success={final_full['success_rate']:.2f}")
+    print(f"FINAL Short: Success={final_results['short']['success_rate']:.2f}, "
+          f"Reward={final_results['short']['avg_reward']:.2f}")
+    print(f"FINAL Full:  Success={final_results['full']['success_rate']:.2f}, "
+          f"Reward={final_results['full']['avg_reward']:.2f}")
+    print(f"FINAL Gen:   Success={final_results['gen']['success_rate']:.2f}, "
+          f"AvgDev={final_results['gen']['avg_deviation']:.3f}m")
 
     agent.save(models_dir, "final_model")
-
-    gen_rate = random_arc_generalization_test(
-        test_env_full, agent, rng=rng_generalization_test, episodes=100
-    )
-    print(f"Random-Arc Generalization (100 trials): Success Rate={gen_rate:.2f}")
+    print("Final model saved.")
 
     env.close()
     test_env_short.close()
     test_env_full.close()
+    test_env_gen.close()
     writer.close()
 
 

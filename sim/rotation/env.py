@@ -18,9 +18,10 @@ class SimplePathFollowingEnv(gym.Env):
     Action: [force_x, force_y, torque_z] (3D)
 
     goal_thresh is computed dynamically at each reset() as:
-        goal_thresh = goal_thresh_pct * segment_length
+        goal_thresh = max(goal_thresh_pct * segment_length, goal_thresh_min)
     This ensures the success criterion scales consistently with segment length,
-    whether training on short segments or evaluating on full arcs.
+    whether training on short segments or evaluating on full arcs, and never
+    collapses to an unreachably small value on very short segments.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 40}
@@ -34,6 +35,7 @@ class SimplePathFollowingEnv(gym.Env):
         self.max_force = kwargs.get('max_force', 400.0)
         self.max_torque = kwargs.get('max_torque', 50.0)
         self.goal_thresh_pct = kwargs.get('goal_thresh_pct', 0.10)
+        self.goal_thresh_min = kwargs.get('goal_thresh_min', 0.03)  # floor to prevent collapse
         self.max_steps = kwargs.get('max_steps', 500)
         self.goal_pos = kwargs.get('goal_pos', None)
         self.friction = kwargs.get('friction', 0.2)
@@ -108,6 +110,9 @@ class SimplePathFollowingEnv(gym.Env):
         self.prev_time = None
         self.steps = 0
         self.last_closest_idx = 0
+        self.sampled_mass = self.model.body_mass[self.box_body_id]
+        self.sampled_friction = self.friction
+        self._reverse_path = False  # set externally to force a specific traversal direction
 
     def _generate_arc_path(self, radius=1.5, start_angle=-np.pi / 3, end_angle=np.pi / 3, num_points=50):
         points = []
@@ -152,26 +157,44 @@ class SimplePathFollowingEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        if self.test_full_arc:
-            self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
-            self.segment_length = None
-        self._make_training_segment()
+        # Generate full path geometry
+        self.full_path = self._generate_arc_path(
+            self.arc_radius, self.arc_start, self.arc_end
+        )
 
-        # Compute goal_thresh dynamically, but cap it at a strict maximum of 5 cm (0.05m)
+        if self.test_full_arc:
+            # Caller controls direction via _reverse_path; no internal randomization
+            self.segment_length = None
+        else:
+            # Randomly reverse traversal direction 50% of the time during training.
+            # Same arc geometry, opposite direction — teaches the policy both orientations.
+            if self.np_random.random() > 0.5:
+                self.full_path = self.full_path[::-1].copy()
+
+        # Apply external direction override (used by visualize.py and gen eval)
+        # This is applied after the internal randomization so it takes full effect.
+        # Note: for test_full_arc envs, _reverse_path is the sole direction control.
+        if self._reverse_path:
+            self.full_path = self.full_path[::-1].copy()
+
+        self._make_training_segment()
         seg_len = self._compute_segment_length()
-        self.goal_thresh = min(self.goal_thresh_pct * seg_len, 0.05)
+
+        # BUG FIX #2: use a minimum floor so goal_thresh never collapses on
+        # very short segments (e.g. 0.10 * 0.1m = 0.01m is unreachably tight).
+        self.goal_thresh = max(self.goal_thresh_pct * seg_len, self.goal_thresh_min)
 
         mujoco.mj_resetData(self.model, self.data)
 
         # --- Domain Randomization: sample mass and friction each episode ---
-        sampled_mass = self.np_random.uniform(self.mass_range[0], self.mass_range[1])
-        self.model.body_mass[self.box_body_id] = sampled_mass
+        self.sampled_mass = self.np_random.uniform(self.mass_range[0], self.mass_range[1])
+        self.model.body_mass[self.box_body_id] = self.sampled_mass
 
-        sampled_friction = self.np_random.uniform(self.friction_range[0], self.friction_range[1])
+        self.sampled_friction = self.np_random.uniform(self.friction_range[0], self.friction_range[1])
         box_geom_id = self.model.geom('box_geom').id
         floor_geom_id = self.model.geom('floor').id
-        self.model.geom_friction[box_geom_id][0] = sampled_friction
-        self.model.geom_friction[floor_geom_id][0] = sampled_friction
+        self.model.geom_friction[box_geom_id][0] = self.sampled_friction
+        self.model.geom_friction[floor_geom_id][0] = self.sampled_friction
 
         start_pos = [self.path_points[0][0], self.path_points[0][1], 0.2]
 
@@ -205,17 +228,13 @@ class SimplePathFollowingEnv(gym.Env):
         current_position = pos[:2]
         orientation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz')[2]
 
-        # --- Find Closest Point ---
-        search_start_idx = max(0, self.last_closest_idx - 10)
-        search_end_idx = min(self.last_closest_idx + 20, len(self.path_points))
-        path_segment_to_search = self.path_points[search_start_idx:search_end_idx]
-
-        if len(path_segment_to_search) > 0:
-            dists = np.linalg.norm(path_segment_to_search - current_position, axis=1)
-            segment_closest_idx = np.argmin(dists)
-            closest_idx = search_start_idx + segment_closest_idx
-        else:
-            closest_idx = self.last_closest_idx
+        # --- BUG FIX #4: Full search over all path points (only 50) for true
+        # closest point. This is Markov-correct: the same physical position always
+        # maps to the same closest index, regardless of how the box got there.
+        # The old sliding window could lock onto the wrong point after deviations
+        # or on reversed arcs where the asymmetric window looked the wrong way. ---
+        dists = np.linalg.norm(self.path_points - current_position, axis=1)
+        closest_idx = int(np.argmin(dists))
         self.last_closest_idx = closest_idx
 
         closest_point = self.path_points[closest_idx]
@@ -264,6 +283,9 @@ class SimplePathFollowingEnv(gym.Env):
         self.prev_time = current_time
 
         # --- Physics Feature (Reactive Force) ---
+        # Encodes the current mass/friction regime so the policy can condition
+        # its behaviour on the physical parameters — explicit parametrization
+        # for sim-to-real transfer rather than expecting blind generalisation.
         mass = self.model.body_mass[self.box_body_id]
         friction = self.model.geom_friction[self.model.geom('box_geom').id][0]
         norm_reactive_force = (mass * friction * 9.81) / self.max_force
@@ -363,6 +385,8 @@ class SimplePathFollowingEnv(gym.Env):
             "reward_comps": reward_comps,
             "terminal_event": terminal_event,
             "terminal_adjustment": terminal_adj,
+            "sampled_mass": self.sampled_mass,
+            "sampled_friction": self.sampled_friction,
         }
 
         return state_after, reward, done, truncated, info
@@ -391,11 +415,13 @@ class SimplePathFollowingEnv(gym.Env):
 
         # 1. Positive Progress: earn points for distance covered along the path tangent
         distance_forward = speed_along_path * dt
-        r_progress = 100.0 * distance_forward  # completing a 0.3m segment yields ~+30 steady points
+        alignment = np.exp(-5.0 * lateral_error)
+        r_progress = 100.0 * distance_forward * alignment
 
         # 2. Speed Penalty: gentle nudge to keep near target speed
         target_speed = 0.3
-        r_speed = -2.0 * abs(speed_along_path - target_speed)
+        r_speed = -8.0 * (speed_along_path - target_speed) ** 2
+        # r_speed = -2.0 * abs(speed_along_path - target_speed)
 
         # 3. Virtual Constraints: keep box on the rails (softened)
         r_constraint_lat = -10.0 * (lateral_error ** 2)
