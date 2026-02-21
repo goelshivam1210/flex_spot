@@ -332,6 +332,10 @@ def main():
             length=args.m_length,
             amplitude=args.m_amplitude,
         ),
+        "triple_s": generate_triple_s_path(
+            length=args.s_length * 1.5,
+            amplitude=args.s_amplitude * 0.8,
+        )
     }
 
     # Run episodes for each path type
