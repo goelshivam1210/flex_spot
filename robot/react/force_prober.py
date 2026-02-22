@@ -31,11 +31,11 @@ class ForceProber:
     def __init__(
         self,
         max_force: float = 250.0,           # F_max for normalisation (N)
-        probe_step_m: float = 0.02,        # equilibrium advance per step (m)
+        probe_step_m: float = 0.005,        # equilibrium advance per step (m)
         max_probe_steps: int = 30,          # steps before giving up
         settle_time_s: float = 1,         # sample window per step (s)
         force_drop_threshold: float = 4.0,  # N drop that signals breakaway
-        impedance_stiffness: float = 500.0, # translational stiffness (N/m)
+        impedance_stiffness: float = 250.0, # translational stiffness (N/m)
         impedance_damping: float = 30.0,    # translational damping (Ns/m)
     ):
         self.max_force            = float(max_force)
@@ -136,7 +136,14 @@ class ForceProber:
 
         def _read_force() -> float:
             ft = sc.get_robot_state().manipulator_state.estimated_end_effector_force_in_hand
-            return float(np.linalg.norm([ft.x, ft.y, ft.z]))
+            # Rotate force from hand frame into body frame via quaternion sandwich
+            f = np.array([ft.x, ft.y, ft.z])
+            q = body_T_hand.rot
+            t = 2.0 * np.cross([q.x, q.y, q.z], f)
+            f_body = f + q.w * t + np.cross([q.x, q.y, q.z], t)
+            # Project onto probe axis — isolates push force, rejects clamping force.
+            # Negate: box pushes arm back (Newton's 3rd), so raw projection is negative.
+            return -float(probe_axis[0] * f_body[0] + probe_axis[1] * f_body[1])
 
         def _sample(duration_s: float):
             """Sample F/T at ~50 Hz. Returns (mean, peak) of projected force."""
@@ -155,33 +162,32 @@ class ForceProber:
         # Activate impedance at 0 and let it settle before baseline
         print("[ForceProber] Settling...")
         _send(0.0)
-        time.sleep(self.settle_time_s * 10)
+        time.sleep(3.0)
         baseline, _ = _sample(self.settle_time_s)
         print(f"[ForceProber] Baseline: {baseline:.1f} N")
 
-        prev_net = 0.0
-        max_net  = 0.0
-
-        # _send(self.probe_step_m)
-        # time.sleep(self.settle_time_s)
+        max_peak = 0.0
+        steps_below = 0  # consecutive steps with force < max_peak - threshold
 
         for step in range(1, self.max_probe_steps + 1):
             _send(step * self.probe_step_m)
-            _, peak_raw = _sample(self.settle_time_s)
-            net = max(peak_raw - baseline, 0.0)
-            max_net = max(max_net, net)
+            _, peak_abs = _sample(self.settle_time_s)
+            max_peak = max(max_peak, peak_abs)
 
             eq_mm = step * self.probe_step_m * 1000
-            print(f"[ForceProber] Step {step}: {net:.1f} N net "
-                  f"(eq={eq_mm:.0f} mm, expected ~{k * step * self.probe_step_m:.1f} N)")
+            print(f"[ForceProber] Step {step}: {peak_abs:.1f} N  "
+                  f"(max={max_peak:.1f} N, eq={eq_mm:.0f} mm)")
 
-            if prev_net > self.force_drop_threshold and \
-               (prev_net - net) > self.force_drop_threshold:
-                print(f"[ForceProber] Breakaway: {prev_net:.1f} → {net:.1f} N  "
-                      f"peak={max_net:.1f} N")
-                return max_net  # return overall peak, not the kinetic-friction step
+            # Require 2 consecutive steps below max_peak to confirm breakaway
+            # (single-step spike followed by a slight drop should not trigger)
+            if (max_peak - peak_abs) > self.force_drop_threshold:
+                steps_below += 1
+                if steps_below >= 2:
+                    print(f"[ForceProber] Breakaway confirmed: peak={max_peak:.1f} N  "
+                          f"current={peak_abs:.1f} N")
+                    return max_peak
+            else:
+                steps_below = 0
 
-            prev_net = net
-
-        print(f"[ForceProber] No clean breakaway, peak={max_net:.1f} N")
-        return max_net
+        print(f"[ForceProber] No clean breakaway, peak={max_peak:.1f} N")
+        return max_peak

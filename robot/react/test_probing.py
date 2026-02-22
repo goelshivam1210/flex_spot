@@ -102,7 +102,7 @@ with LeaseKeepAlive(spot.lease_client, must_acquire=True, return_at_exit=True):
                     max_distance_m=3.0,
                 )
     spot.grasp_edge(target_pixel, img_src=args.image_source)
-    # spot.open_gripper()
+    spot.open_gripper()
 
 
     # 2. Grasp edge

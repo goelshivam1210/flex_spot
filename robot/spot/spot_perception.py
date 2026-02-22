@@ -26,7 +26,7 @@ class SpotPerception:
 
     @staticmethod
     def find_grasp_sam(cv_img, depth_img, left, conf=0.15, min_area_frac=0.03,
-                       group_adj=True, gap_frac=0.18, pad_frac=0.1,
+                       group_adj=False, gap_frac=0.18, pad_frac=0.1,
                        prefer_largest=True, center_bias=0.4, max_distance_m=3.0):
         # device = "cuda" if torch.cuda.is_available() else "cpu"
         device = "mps" if torch.backends.mps.is_available() else "cpu"
