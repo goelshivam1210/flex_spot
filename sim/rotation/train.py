@@ -287,6 +287,9 @@ def main():
     milestone      = 10_000
     next_mark      = milestone
 
+    # Composite model saving
+    best_composite = 0.0
+
     for ep in range(episodes):
         with contextlib.redirect_stdout(io.StringIO()):
             state, _ = env.reset()
@@ -389,10 +392,11 @@ def main():
                   f"Gen: {gen_succ:.2f}")
 
             # Save best full-arc model
-            if full_succ > best_full_success:
-                best_full_success = full_succ
+            composite = 0.5 * full_succ + 0.5 * gen_succ
+            if composite > best_composite:
+                best_composite = composite
                 agent.save(models_dir, "best_model")
-                print(f"  New best full-arc: {best_full_success:.2f} — best_model saved")
+                print(f"  New best composite: {best_composite:.2f} (full={full_succ:.2f}, gen={gen_succ:.2f})")
 
             next_eval_ep = ep + eval_freq
 

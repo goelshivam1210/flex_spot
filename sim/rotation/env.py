@@ -163,24 +163,20 @@ class SimplePathFollowingEnv(gym.Env):
         )
 
         if self.test_full_arc:
-            # Caller controls direction via _reverse_path; no internal randomization
             self.segment_length = None
-        else:
-            # Randomly reverse traversal direction 50% of the time during training.
-            # Same arc geometry, opposite direction — teaches the policy both orientations.
-            if self.np_random.random() > 0.5:
+            if self._reverse_path:
                 self.full_path = self.full_path[::-1].copy()
-
-        # Apply external direction override (used by visualize.py and gen eval)
-        # This is applied after the internal randomization so it takes full effect.
-        # Note: for test_full_arc envs, _reverse_path is the sole direction control.
-        if self._reverse_path:
-            self.full_path = self.full_path[::-1].copy()
+        else:
+            # _reverse_path overrides internal randomization if set
+            if self._reverse_path:
+                self.full_path = self.full_path[::-1].copy()
+            elif self.np_random.random() > 0.5:
+                self.full_path = self.full_path[::-1].copy()
 
         self._make_training_segment()
         seg_len = self._compute_segment_length()
 
-        # BUG FIX #2: use a minimum floor so goal_thresh never collapses on
+        # use a minimum floor so goal_thresh never collapses on
         # very short segments (e.g. 0.10 * 0.1m = 0.01m is unreachably tight).
         self.goal_thresh = max(self.goal_thresh_pct * seg_len, self.goal_thresh_min)
 
@@ -228,7 +224,7 @@ class SimplePathFollowingEnv(gym.Env):
         current_position = pos[:2]
         orientation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz')[2]
 
-        # --- BUG FIX #4: Full search over all path points (only 50) for true
+        # Full search over all path points (only 50) for true
         # closest point. This is Markov-correct: the same physical position always
         # maps to the same closest index, regardless of how the box got there.
         # The old sliding window could lock onto the wrong point after deviations

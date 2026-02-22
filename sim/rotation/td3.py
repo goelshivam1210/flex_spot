@@ -129,8 +129,15 @@ class TD3:
             # Select next action according to target policy:
             noise = torch.randn(action_.shape, generator=self.torch_rng, device=device) * policy_noise
             noise = noise.clamp(-noise_clip, noise_clip)
+            # next_action = (self.actor_target(next_state) + noise)
+            # next_action = next_action.clamp(-self.max_action, self.max_action)
+
             next_action = (self.actor_target(next_state) + noise)
-            next_action = next_action.clamp(-self.max_action, self.max_action)
+            force = next_action[:, :2]
+            force_norm = torch.norm(force, dim=1, keepdim=True).clamp(min=1.0)
+            force = force / force_norm
+            torque = next_action[:, 2:].clamp(-1.0, 1.0)
+            next_action = torch.cat([force, torque], dim=1)
             
             # Compute target Q-value:
             target_Q1 = self.critic_1_target(next_state, next_action)

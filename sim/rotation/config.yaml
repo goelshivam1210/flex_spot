@@ -35,7 +35,7 @@ agent:
   exploration_noise: 0.1
 
 training:
-  episodes: 1001
+  episodes: 3001
   start_timesteps: 2000
   save_freq: 500
   train_segment_mode: "short"
