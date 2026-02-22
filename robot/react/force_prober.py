@@ -1,43 +1,23 @@
 """
-force_prober.py
+force_prober.py — estimates norm_reactive_force = μmg / F_max via impedance probing.
 
-Estimates the reactive force feature (norm_reactive_force = μmg / F_max)
-by commanding small incremental pushes while grasping the object and
-monitoring when it breaks static friction.
-
-The probing procedure:
-  1. Command a sequence of small positional displacements along the probe axis.
-  2. After each displacement, read the wrist force-torque sensor.
-  3. Detect the static-friction breakaway: the step where the measured force
-     drops (the object started moving) or the object position changes.
-  4. The breakaway force magnitude is F_react ≈ μmg.
-  5. Return norm_reactive_force = F_react / F_max.
-
-If the Spot SDK force-torque API is unavailable or probing fails for any
-reason, a safe calibrated default is returned instead.
-
-Date: February 2026
+Ramps a virtual spring equilibrium forward along a probe axis while monitoring the
+wrist F/T sensor at 50 Hz. Breakaway (static → kinetic transition) shows as a force
+drop; returns the peak force before the drop normalised by F_max.
 """
 
 import time
+import math
 import numpy as np
 
-# Spot SDK imports — guarded so the module can be imported in simulation too
 try:
-    from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME
-    from bosdyn.client.robot_command import RobotCommandBuilder, block_until_arm_arrives
-    from bosdyn.client.math_helpers import SE3Pose
+    from bosdyn.api import robot_command_pb2, geometry_pb2, trajectory_pb2
+    from bosdyn.client.frame_helpers import get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME
+    from bosdyn.client.math_helpers import SE3Pose, Quat
     _SPOT_AVAILABLE = True
 except ImportError:
     _SPOT_AVAILABLE = False
 
-
-# ---------------------------------------------------------------------------
-# Default reactive force calibration table.
-# Used when probing is skipped or fails.
-# Keys are (grasp_strategy, surface_type), values are norm_reactive_force.
-# Tune these from offline experiments.
-# ---------------------------------------------------------------------------
 _DEFAULTS = {
     ("edge_grasp",   "floor"): 0.35,
     ("handle_grasp", "floor"): 0.30,
@@ -48,290 +28,160 @@ _DEFAULTS = {
 
 
 class ForceProber:
-    """
-    Estimates norm_reactive_force = μmg / F_max for the current episode.
-
-    Two modes:
-      - probe()  : Active estimation via EEF force-torque sensing on the robot.
-      - default() : Returns a calibrated fallback value without touching the robot.
-
-    The result from either method can be passed directly to StateEstimator.
-    """
-
     def __init__(
         self,
-        max_force: float = 400.0,
-        probe_step_m: float = 0.005,
-        max_probe_steps: int = 20,
-        settle_time_s: float = 0.3,
-        force_drop_threshold: float = 5.0,
-        position_move_threshold_m: float = 0.005,
+        max_force: float = 250.0,           # F_max for normalisation (N)
+        probe_step_m: float = 0.02,        # equilibrium advance per step (m)
+        max_probe_steps: int = 30,          # steps before giving up
+        settle_time_s: float = 1,         # sample window per step (s)
+        force_drop_threshold: float = 4.0,  # N drop that signals breakaway
+        impedance_stiffness: float = 500.0, # translational stiffness (N/m)
+        impedance_damping: float = 30.0,    # translational damping (Ns/m)
     ):
-        """
-        Args:
-            max_force:                 F_max used to normalise the result (N).
-            probe_step_m:              EEF displacement per probe step (m).
-                                       Small enough to not disturb the object much.
-            max_probe_steps:           Maximum number of probe steps before giving up.
-            settle_time_s:             Wait time after each step before reading sensor (s).
-            force_drop_threshold:      Force drop (N) that signals breakaway.
-            position_move_threshold_m: Object movement (m) that signals breakaway.
-        """
-        self.max_force                = float(max_force)
-        self.probe_step_m             = float(probe_step_m)
-        self.max_probe_steps          = int(max_probe_steps)
-        self.settle_time_s            = float(settle_time_s)
-        self.force_drop_threshold     = float(force_drop_threshold)
-        self.position_move_threshold_m = float(position_move_threshold_m)
+        self.max_force            = float(max_force)
+        self.probe_step_m         = float(probe_step_m)
+        self.max_probe_steps      = int(max_probe_steps)
+        self.settle_time_s        = float(settle_time_s)
+        self.force_drop_threshold = float(force_drop_threshold)
+        self.impedance_stiffness  = float(impedance_stiffness)
+        self.impedance_damping    = float(impedance_damping)
+        self._last_result: float  = None
 
-        self._last_result: float | None = None
+    @property
+    def last_result(self) -> float:
+        return self._last_result
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    @property
-    def last_result(self) -> float | None:
-        """The norm_reactive_force estimated in the most recent probe() call."""
-        return self._last_result
-
-    def default(
-        self,
-        grasp_strategy: str = "edge_grasp",
-        surface_type: str = "floor",
-    ) -> float:
+    def probe(self, spot, probe_axis=None, grasp_strategy="edge_grasp",
+              surface_type="floor", robot_side="left") -> float:
         """
-        Return a calibrated default norm_reactive_force without robot interaction.
-
-        Args:
-            grasp_strategy: "edge_grasp" or "handle_grasp".
-            surface_type:   "floor" or "mat".
-
-        Returns:
-            float in [0, 1].
-        """
-        key = (grasp_strategy, surface_type)
-        value = _DEFAULTS.get(key, _DEFAULTS["fallback"])
-        self._last_result = float(value)
-        print(f"[ForceProber] Using calibrated default: {self._last_result:.3f} "
-              f"(strategy={grasp_strategy}, surface={surface_type})")
-        return self._last_result
-
-    def probe(
-        self,
-        spot,
-        probe_axis: np.ndarray = None,
-        grasp_strategy: str = "edge_grasp",
-        surface_type: str = "floor",
-    ) -> float:
-        """
-        Actively estimate norm_reactive_force by probing on the robot.
-
-        The robot commands a sequence of small EEF displacements along
-        probe_axis while holding the object. When the wrist force sensor
-        detects breakaway (force drop or object movement), the applied
-        force at that step is used to estimate F_react.
-
-        Falls back to default() if:
-          - Spot SDK is not available.
-          - Force-torque sensor is unavailable.
-          - No breakaway detected within max_probe_steps.
-          - Any exception occurs.
-
-        Args:
-            spot:           Spot robot instance (spot.py Spot class).
-            probe_axis:     Unit vector [x, y] in vision frame to push along.
-                            Defaults to robot forward direction.
-            grasp_strategy: Used for fallback default lookup.
-            surface_type:   Used for fallback default lookup.
-
-        Returns:
-            float in [0, 1] — norm_reactive_force for this episode.
+        Actively probe and return norm_reactive_force in [0, 1].
+        Falls back to a calibrated default on any failure.
         """
         if not _SPOT_AVAILABLE:
-            print("[ForceProber] Spot SDK not available, using default.")
-            return self.default(grasp_strategy, surface_type)
+            return self._use_default(grasp_strategy, surface_type)
 
         if probe_axis is None:
-            # Default: push along robot forward direction in vision frame
-            import math
             _, _, yaw = spot.get_current_pose()
+            yaw += -math.pi / 4 if robot_side == "left" else math.pi / 4
             probe_axis = np.array([math.cos(yaw), math.sin(yaw)])
 
-        probe_axis = np.array(probe_axis[:2], dtype=float)
-        axis_norm = np.linalg.norm(probe_axis)
-        if axis_norm < 1e-8:
-            print("[ForceProber] probe_axis is zero vector, using robot forward direction.")
-            import math
-            _, _, yaw = spot.get_current_pose()
-            probe_axis = np.array([math.cos(yaw), math.sin(yaw)])
-        else:
-            probe_axis /= axis_norm
+        probe_axis = np.asarray(probe_axis[:2], dtype=float)
+        probe_axis /= np.linalg.norm(probe_axis)
 
         try:
-            result = self._run_probe(spot, probe_axis)
-            if result is None:
-                print("[ForceProber] Breakaway not detected, using default.")
-                return self.default(grasp_strategy, surface_type)
-
-            self._last_result = float(np.clip(result / self.max_force, 0.0, 1.0))
-            print(f"[ForceProber] Probed F_react={result:.1f}N → "
-                  f"norm_reactive_force={self._last_result:.3f}")
+            f_react = self._impedance_probe(spot, probe_axis)
+            self._last_result = float(np.clip(f_react / self.max_force, 0.0, 1.0))
+            print(f"[ForceProber] F_react={f_react:.1f} N → norm={self._last_result:.3f}")
             return self._last_result
-
         except Exception as e:
             print(f"[ForceProber] Probing failed ({e}), using default.")
-            return self.default(grasp_strategy, surface_type)
+            return self._use_default(grasp_strategy, surface_type)
+
+    def _use_default(self, grasp_strategy="edge_grasp", surface_type="floor") -> float:
+        val = _DEFAULTS.get((grasp_strategy, surface_type), _DEFAULTS["fallback"])
+        self._last_result = float(val)
+        print(f"[ForceProber] Default: {self._last_result:.3f}")
+        return self._last_result
 
     # ------------------------------------------------------------------
-    # Private implementation
+    # Impedance probe
     # ------------------------------------------------------------------
 
-    def _run_probe(self, spot, probe_axis: np.ndarray) -> float | None:
+    def _impedance_probe(self, spot, probe_axis: np.ndarray) -> float:
         """
-        Execute incremental probe steps and detect breakaway.
-
-        Returns the estimated breakaway force in Newtons, or None if not found.
+        Ramp spring equilibrium along probe_axis in GRAV_ALIGNED_BODY_FRAME x-y plane.
+        Returns peak wrist force (net of baseline) observed before breakaway.
         """
-        state_client  = spot._client._state_client
-        command_client = spot._client._command_client
+        sc = spot._client._state_client
+        cc = spot._client._command_client
 
-        # Get initial hand pose in vision frame
-        snapshot      = state_client.get_robot_state().kinematic_state.transforms_snapshot
-        vision_T_hand = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
-        if vision_T_hand is None:
-            raise RuntimeError("Cannot get hand pose for probing.")
+        snap        = sc.get_robot_state().kinematic_state.transforms_snapshot
+        body_T_hand = get_a_tform_b(snap, GRAV_ALIGNED_BODY_FRAME_NAME, "hand")
+        if body_T_hand is None:
+            raise RuntimeError("Cannot get hand pose.")
 
-        start_hand_pos = np.array([vision_T_hand.x, vision_T_hand.y, vision_T_hand.z])
-        current_target = start_hand_pos.copy()
+        k, d = self.impedance_stiffness, self.impedance_damping
 
-        prev_force_mag = None
+        def _send(offset_m: float):
+            """Send impedance command with equilibrium offset_m ahead along probe_axis."""
+            cmd = robot_command_pb2.RobotCommand()
+            imp = cmd.synchronized_command.arm_command.arm_impedance_command
+            imp.root_frame_name = GRAV_ALIGNED_BODY_FRAME_NAME
+            # Task frame = body frame (identity root_tform_task)
+            imp.root_tform_task.CopyFrom(SE3Pose(0, 0, 0, Quat()).to_proto())
+            imp.wrist_tform_tool.CopyFrom(SE3Pose(0, 0, 0, Quat()).to_proto())
+            # High z stiffness keeps hand at same height; x-y stiffness drives the push
+            imp.diagonal_stiffness_matrix.CopyFrom(
+                geometry_pb2.Vector(values=[k, k, 500.0, 20.0, 20.0, 20.0])
+            )
+            imp.diagonal_damping_matrix.CopyFrom(
+                geometry_pb2.Vector(values=[d, d, d, 1.0, 1.0, 1.0])
+            )
+            target = SE3Pose(
+                x=body_T_hand.x + offset_m * probe_axis[0],
+                y=body_T_hand.y + offset_m * probe_axis[1],
+                z=body_T_hand.z,
+                rot=body_T_hand.rot,
+            )
+            pt = trajectory_pb2.SE3TrajectoryPoint()
+            pt.pose.CopyFrom(target.to_proto())
+            traj = trajectory_pb2.SE3Trajectory()
+            traj.points.append(pt)
+            imp.task_tform_desired_tool.CopyFrom(traj)
+            cc.robot_command(cmd)
+
+        def _read_force() -> float:
+            ft = sc.get_robot_state().manipulator_state.estimated_end_effector_force_in_hand
+            return float(np.linalg.norm([ft.x, ft.y, ft.z]))
+
+        def _sample(duration_s: float):
+            """Sample F/T at ~50 Hz. Returns (mean, peak) of projected force."""
+            samples = []
+            t_end = time.time() + duration_s
+            while time.time() < t_end:
+                try:
+                    samples.append(_read_force())
+                except Exception:
+                    pass
+                time.sleep(0.02)
+            if not samples:
+                raise RuntimeError("F/T sensor unavailable.")
+            return float(np.mean(samples)), float(max(samples))
+
+        # Activate impedance at 0 and let it settle before baseline
+        print("[ForceProber] Settling...")
+        _send(0.0)
+        time.sleep(self.settle_time_s * 10)
+        baseline, _ = _sample(self.settle_time_s)
+        print(f"[ForceProber] Baseline: {baseline:.1f} N")
+
+        prev_net = 0.0
+        max_net  = 0.0
+
+        # _send(self.probe_step_m)
+        # time.sleep(self.settle_time_s)
 
         for step in range(1, self.max_probe_steps + 1):
-            # --- Command small displacement along probe axis ---
-            current_target[0] += self.probe_step_m * probe_axis[0]
-            current_target[1] += self.probe_step_m * probe_axis[1]
+            _send(step * self.probe_step_m)
+            _, peak_raw = _sample(self.settle_time_s)
+            net = max(peak_raw - baseline, 0.0)
+            max_net = max(max_net, net)
 
-            target_pose = SE3Pose(
-                x=current_target[0],
-                y=current_target[1],
-                z=current_target[2],
-                rot=vision_T_hand.rot,
-            )
-            arm_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
-                target_pose.to_proto(), VISION_FRAME_NAME, seconds=1.0
-            )
-            cmd_id = command_client.robot_command(arm_cmd)
-            block_until_arm_arrives(command_client, cmd_id, timeout_sec=2.0)
+            eq_mm = step * self.probe_step_m * 1000
+            print(f"[ForceProber] Step {step}: {net:.1f} N net "
+                  f"(eq={eq_mm:.0f} mm, expected ~{k * step * self.probe_step_m:.1f} N)")
 
-            # Let the system settle before reading
-            time.sleep(self.settle_time_s)
+            if prev_net > self.force_drop_threshold and \
+               (prev_net - net) > self.force_drop_threshold:
+                print(f"[ForceProber] Breakaway: {prev_net:.1f} → {net:.1f} N  "
+                      f"peak={max_net:.1f} N")
+                return max_net  # return overall peak, not the kinetic-friction step
 
-            # --- Read wrist force-torque sensor ---
-            force_mag = self._read_wrist_force(state_client)
-            if force_mag is None:
-                # Sensor unavailable — fall back
-                raise RuntimeError("Force-torque sensor unavailable.")
+            prev_net = net
 
-            # --- Applied force estimate (NEEDS CALIBRATION) ---
-            #
-            # What we want: the actual force being transmitted through the gripper
-            # to the object at this probe step.
-            #
-            # What we have: the wrist F/T sensor reading (force_mag), which measures
-            # the reaction force at the wrist joint — this includes both the force
-            # on the object AND the arm's own inertia/weight components.
-            #
-            # Current approach: we use force_mag directly as the F_react estimate,
-            # under the assumption that:
-            #   (a) the arm is quasi-static (slow probe steps, so inertia is small)
-            #   (b) gravity compensation is handled by the Spot SDK internally
-            #   (c) therefore force_mag ≈ contact force on object ≈ μmg at breakaway
-            #
-            # This is a rough approximation. In practice you may need to:
-            #   1. Subtract a baseline: read force_mag BEFORE contact and subtract it
-            #      to remove gravity/arm-weight bias.
-            #   2. Scale by a calibration factor: run known-mass objects and compare
-            #      force_mag at breakaway to the known μmg value.
-            #   3. Project onto the probe axis: use the raw [fx, fy, fz] vector and
-            #      dot it with probe_axis rather than taking the full magnitude, to
-            #      isolate the contact force component from side-load noise.
-            #
-            # The applied_force_estimate variable below is an alternative linear ramp
-            # model (stiffness * displacement). It is NOT currently used in breakaway
-            # detection — we kept it here as a reference for future calibration work.
-            # Once you have real data, you can compare force_mag vs applied_force_estimate
-            # per step to back out the effective contact stiffness of the setup.
-            #
-            # TO CALIBRATE:
-            #   1. Run probe() on objects of known mass m and friction μ.
-            #   2. Record force_mag at the breakaway step.
-            #   3. Compute calibration_factor = (μ * m * 9.81) / force_mag_at_breakaway
-            #   4. Apply: F_react = force_mag * calibration_factor
-            #   5. Update _DEFAULTS table with values from this procedure.
-            applied_force_estimate = step * self.probe_step_m * self.max_force / 0.1
-            # ^ linear ramp model: assumes F_max would be reached over 0.1m of displacement.
-            # 0.1m is a placeholder — replace with the measured compliance of your setup.
-            # Not used in detection logic currently; kept for calibration reference only.
-
-            # --- Detect breakaway ---
-            # Condition 1: force DROP between consecutive steps.
-            #
-            # Physics: as we incrementally push, the F/T sensor reading ramps up
-            # while the object is stationary (static friction building). At breakaway,
-            # static friction is overcome and the object starts sliding. Kinetic
-            # friction is lower than static, so the measured resistance force drops.
-            # The PEAK force (prev_force_mag, the step before the drop) is our best
-            # estimate of F_react = μ_static * m * g.
-            # We return prev_force_mag, not force_mag, for this reason.
-            if prev_force_mag is not None and (prev_force_mag - force_mag) > self.force_drop_threshold:
-                print(f"[ForceProber] Breakaway detected at step {step} "
-                      f"(force drop {prev_force_mag:.1f} → {force_mag:.1f} N)")
-                return prev_force_mag  # peak force before drop ≈ μ_static * m * g
-
-            # Condition 2: hand REACHED commanded position but force is still high.
-            #
-            # Physics: if the hand arrives at the commanded target (small slip between
-            # actual and commanded position), but force_mag is still substantial, it
-            # means the object moved with the hand — breakaway already happened earlier
-            # and we missed the force drop (e.g. due to noisy sensor or coarse steps).
-            # In this case, use the current force_mag as the best available estimate.
-            #
-            # NOTE: This is the OPPOSITE of "the hand didn't reach commanded pos".
-            # If the hand DIDN'T reach commanded pos (large slip), that means the
-            # object is resisting and we are still in the pre-breakaway ramp — do NOT
-            # trigger breakaway detection in that case.
-            snapshot_now = state_client.get_robot_state().kinematic_state.transforms_snapshot
-            hand_now     = get_a_tform_b(snapshot_now, VISION_FRAME_NAME, "hand")
-            if hand_now is not None:
-                actual_pos    = np.array([hand_now.x, hand_now.y])
-                commanded_pos = current_target[:2]
-                # slip = how far the hand fell short of the commanded target
-                slip = np.linalg.norm(actual_pos - commanded_pos)
-                # Small slip = hand arrived → object may have moved with it
-                if slip < self.position_move_threshold_m and force_mag > self.force_drop_threshold:
-                    print(f"[ForceProber] Object moved with hand at step {step} "
-                          f"(slip={slip:.4f} m, force={force_mag:.1f} N)")
-                    return force_mag
-
-            prev_force_mag = force_mag
-            print(f"[ForceProber] Step {step}: force={force_mag:.1f} N, no breakaway yet")
-
-        # No breakaway found
-        return None
-
-    @staticmethod
-    def _read_wrist_force(state_client) -> float | None:
-        """
-        Read the wrist force-torque sensor magnitude from robot state.
-
-        Returns force magnitude in Newtons, or None if unavailable.
-        """
-        try:
-            robot_state = state_client.get_robot_state()
-            # Spot SDK: manipulator_state.estimated_end_effector_force_in_hand
-            ft = robot_state.manipulator_state.estimated_end_effector_force_in_hand
-            force_vec = np.array([ft.x, ft.y, ft.z])
-            return float(np.linalg.norm(force_vec))
-        except Exception:
-            return None
+        print(f"[ForceProber] No clean breakaway, peak={max_net:.1f} N")
+        return max_net
