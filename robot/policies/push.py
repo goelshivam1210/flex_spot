@@ -13,7 +13,7 @@ Pipeline:
 
 The policy receives the 6D egocentric state produced by react.StateEstimator,
 which exactly mirrors the simulation training environment. Actions are 3D
-normalised wrenches [ax, ay, a_tau] that are scaled and executed as robot
+normalised wrenches [Fx, Fy, tau] that are scaled and executed as robot
 body displacements via Spot.push_object_from_sim().
 
 Usage:
@@ -38,6 +38,7 @@ from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 # Spot SDK
 from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME
@@ -51,28 +52,59 @@ from react.state_estimator import StateEstimator
 from react.path_generator  import PathGenerator
 from react.force_prober    import ForceProber
 
-# Policy loader
-from flex.policy_manager import PolicyManager
+# TD3 policy
+from react.td3 import TD3
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-# Admittance gain: scales policy action [−1,1] into metres / radians.
-# Mirrors the quasi-static sim-to-real bridge described in the paper:
-#   (Δx, Δy, Δθ) = K * w_t
-# where w_t = (a_x * F_max, a_y * F_max, a_tau * T_max).
-# These are starting values — tune from hardware experiments.
+STATE_DIM  = 6
+ACTION_DIM = 3
+
+# Admittance gains: scale policy action [−1,1] → metres / radians
 DEFAULT_ACTION_SCALE = 0.03   # metres per unit normalised force
 DEFAULT_YAW_SCALE    = 0.05   # radians per unit normalised torque
 
 # Robot execution timing
-STEP_DURATION_S = 2.0   # seconds per control step (matches sim Δt_ctrl)
+STEP_DURATION_S = 3.0   # seconds per control step (matches sim Δt_ctrl)
 
-# Success / termination thresholds
+# Termination thresholds
 SUCCESS_PROGRESS    = 0.95   # fraction of path completed
 DEVIATION_TOLERANCE = 0.15   # metres — abort if EEF drifts beyond this
+
+
+# ---------------------------------------------------------------------------
+# Policy loading
+# ---------------------------------------------------------------------------
+
+def load_policy(model_dir: str, model_name: str,
+                max_action: float = 1.0, max_torque: float = 1.0) -> TD3:
+    """
+    Load a trained TD3 actor from models/react/<model_name>_actor.pth.
+
+    Args:
+        model_dir:  Path to directory containing saved weights, e.g. 'models/react'.
+        model_name: Name prefix used when saving, e.g. 'best' → loads 'best_actor.pth'.
+        max_action: Max force magnitude (passed to Actor constructor — must match training).
+        max_torque: Max torque magnitude (passed to Actor constructor — must match training).
+
+    Returns:
+        TD3 instance with actor loaded and set to eval mode.
+    """
+    policy = TD3(
+        lr=1e-3,              # lr irrelevant at inference — optimizer not used
+        state_dim=STATE_DIM,
+        action_dim=ACTION_DIM,
+        max_action=max_action,
+        max_torque=max_torque,
+    )
+    policy.load_actor(model_dir, model_name)
+    policy.actor.eval()
+    policy.actor_target.eval()
+    print(f"[push] Policy loaded: {model_dir}/{model_name}_actor.pth")
+    return policy
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +118,6 @@ def get_eef_pose(spot):
     Returns:
         hand_pos: np.ndarray [x, y, z] in vision frame.
         yaw:      float, EEF yaw angle in vision frame (radians).
-                  Derived from the hand frame's rotation matrix z-column
-                  projected onto the XY plane — this gives the heading
-                  direction of the gripper in the horizontal plane.
     """
     state    = spot._client._state_client.get_robot_state()
     snapshot = state.kinematic_state.transforms_snapshot
@@ -99,9 +128,7 @@ def get_eef_pose(spot):
 
     hand_pos = np.array([vision_T_hand.x, vision_T_hand.y, vision_T_hand.z])
 
-    # Extract yaw from quaternion — standard ZYX decomposition
     q = vision_T_hand.rot
-    # q is a bosdyn Quaternion with fields w, x, y, z
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     yaw = math.atan2(siny_cosp, cosy_cosp)
@@ -115,17 +142,17 @@ def get_eef_pose(spot):
 
 def compute_progress(hand_pos, path_points):
     """
-    Return (progress, deviation) for the current hand position.
+    Return (progress, deviation, idx) for the current hand position.
 
-    progress:  float in [0, 1] — fraction of path completed, based on
-               the index of the closest path point.
+    progress:  float in [0, 1] — fraction of path completed.
     deviation: float — Euclidean distance from EEF to closest path point (m).
+    idx:       int   — index of closest path point.
     """
-    pts_2d   = path_points[:, :2]
-    pos_2d   = hand_pos[:2]
-    dists    = np.linalg.norm(pts_2d - pos_2d, axis=1)
-    idx      = int(np.argmin(dists))
-    progress = idx / (len(path_points) - 1) if len(path_points) > 1 else 0.0
+    pts_2d    = path_points[:, :2]
+    pos_2d    = hand_pos[:2]
+    dists     = np.linalg.norm(pts_2d - pos_2d, axis=1)
+    idx       = int(np.argmin(dists))
+    progress  = idx / (len(path_points) - 1) if len(path_points) > 1 else 0.0
     deviation = float(dists[idx])
     return progress, deviation, idx
 
@@ -135,17 +162,6 @@ def compute_progress(hand_pos, path_points):
 # ---------------------------------------------------------------------------
 
 def save_plots(robot_positions, path_points, run_dir, experiment_name):
-    """
-    Save two plots:
-      1. Top-down trajectory vs planned path (XY plane).
-      2. X, Y, yaw vs time-step.
-
-    Args:
-        robot_positions: list of (x, y, yaw) tuples, one per step.
-        path_points:     np.ndarray [N x 3] in vision frame.
-        run_dir:         Directory to save plots into.
-        experiment_name: String used in plot titles.
-    """
     positions = np.array(robot_positions)
     rx, ry, ryaw = positions[:, 0], positions[:, 1], positions[:, 2]
 
@@ -162,12 +178,10 @@ def save_plots(robot_positions, path_points, run_dir, experiment_name):
     ax.scatter(rx[0],  ry[0],  color="darkgreen", s=100, marker="^", zorder=5, label="EEF start")
     ax.scatter(rx[-1], ry[-1], color="darkred",   s=100, marker="v", zorder=5, label="EEF end")
 
-    # Orientation arrows every ~10% of steps
     step = max(1, len(rx) // 10)
     for i in range(0, len(rx), step):
         ax.arrow(rx[i], ry[i],
-                 0.08 * math.cos(ryaw[i]),
-                 0.08 * math.sin(ryaw[i]),
+                 0.08 * math.cos(ryaw[i]), 0.08 * math.sin(ryaw[i]),
                  head_width=0.03, head_length=0.02,
                  fc="orange", ec="orange", alpha=0.7)
 
@@ -188,34 +202,22 @@ def save_plots(robot_positions, path_points, run_dir, experiment_name):
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.set_aspect("equal")
-    traj_path = os.path.join(plots_dir, "trajectory.png")
-    fig.savefig(traj_path, dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(plots_dir, "trajectory.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[push] Trajectory plot saved: {traj_path}")
 
-    # --- Plot 2: Position components over time ---
+    # --- Plot 2: Position + yaw over time ---
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
     steps = np.arange(len(rx))
-
-    axes[0].plot(steps, rx, "b-", lw=2)
-    axes[0].set_ylabel("X (m)")
-    axes[0].set_title(f"EEF Position Over Time — {experiment_name}")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(steps, ry, "g-", lw=2)
-    axes[1].set_ylabel("Y (m)")
-    axes[1].grid(True, alpha=0.3)
-
+    axes[0].plot(steps, rx, "b-", lw=2); axes[0].set_ylabel("X (m)"); axes[0].grid(True, alpha=0.3)
+    axes[1].plot(steps, ry, "g-", lw=2); axes[1].set_ylabel("Y (m)"); axes[1].grid(True, alpha=0.3)
     axes[2].plot(steps, np.degrees(ryaw), "r-", lw=2)
-    axes[2].set_ylabel("Yaw (deg)")
-    axes[2].set_xlabel("Step")
-    axes[2].grid(True, alpha=0.3)
-
+    axes[2].set_ylabel("Yaw (deg)"); axes[2].set_xlabel("Step"); axes[2].grid(True, alpha=0.3)
+    axes[0].set_title(f"EEF Position Over Time — {experiment_name}")
     fig.tight_layout()
-    pos_path = os.path.join(plots_dir, "position_over_time.png")
-    fig.savefig(pos_path, dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(plots_dir, "position_over_time.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[push] Position plot saved: {pos_path}")
+
+    print(f"[push] Plots saved to {plots_dir}/")
 
 
 # ---------------------------------------------------------------------------
@@ -224,38 +226,24 @@ def save_plots(robot_positions, path_points, run_dir, experiment_name):
 
 def save_run_data(run_dir, config, robot_positions, path_points,
                   state_log, action_log, duration_s, success):
-    """
-    Save all run data to run_dir:
-        params.json          — experiment configuration
-        eef_trajectory.csv   — per-step EEF pose
-        planned_path.csv     — path waypoints
-        state_log.csv        — per-step 6D state
-        action_log.csv       — per-step 3D action
-    """
     os.makedirs(run_dir, exist_ok=True)
 
-    # params
     with open(os.path.join(run_dir, "params.json"), "w") as f:
-        json.dump({**config,
-                   "duration_s": duration_s,
-                   "success":    success,
-                   "steps":      len(robot_positions)}, f, indent=2)
+        json.dump({**config, "duration_s": duration_s,
+                   "success": success, "steps": len(robot_positions)}, f, indent=2)
 
-    # EEF trajectory
     with open(os.path.join(run_dir, "eef_trajectory.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["step", "x", "y", "yaw"])
         for i, (x, y, yaw) in enumerate(robot_positions):
             w.writerow([i, x, y, yaw])
 
-    # Planned path
     with open(os.path.join(run_dir, "planned_path.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["idx", "x", "y", "z"])
         for i, pt in enumerate(path_points):
             w.writerow([i, pt[0], pt[1], pt[2]])
 
-    # State log
     with open(os.path.join(run_dir, "state_log.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["step", "lateral_err", "orientation_err",
@@ -263,10 +251,9 @@ def save_run_data(run_dir, config, robot_positions, path_points,
         for i, s in enumerate(state_log):
             w.writerow([i] + [f"{v:.6f}" for v in s])
 
-    # Action log
     with open(os.path.join(run_dir, "action_log.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["step", "ax", "ay", "a_tau"])
+        w.writerow(["step", "Fx", "Fy", "tau"])
         for i, a in enumerate(action_log):
             w.writerow([i] + [f"{v:.6f}" for v in a])
 
@@ -277,136 +264,85 @@ def save_run_data(run_dir, config, robot_positions, path_points,
 # Core push execution
 # ---------------------------------------------------------------------------
 
-def run_push(spot, policy, path_points, saved_yaw,
-             norm_reactive_force, args):
+def run_push(spot, policy, path_points, norm_reactive_force, args):
     """
     Execute the path-following push policy loop.
 
-    Args:
-        spot:                 Spot robot instance.
-        policy:               Loaded TD3 policy (PolicyManager result).
-        path_points:          [N x 3] path in vision frame.
-        saved_yaw:            Robot yaw saved at episode start (radians).
-        norm_reactive_force:  Estimated μmg/F_max for this episode.
-        args:                 Parsed command-line arguments.
-
     Returns:
-        success:          bool
-        robot_positions:  list of (x, y, yaw) per step
-        state_log:        list of 6D state arrays per step
-        action_log:       list of 3D action arrays per step
-        duration_s:       float, wall-clock time for the policy loop
+        success, robot_positions, state_log, action_log, duration_s
     """
-    # --- Get initial EEF pose ---
     hand_pos, hand_yaw = get_eef_pose(spot)
     init_time = time.time()
 
-    # --- Initialise state estimator ---
-    # norm_reactive_force is constant for the episode — passed in from probing
-    # or calibrated default. All velocity state starts at zero naturally on
-    # the first compute() call because dt = current_time - init_time ≈ 0.
     estimator = StateEstimator(
         init_hand_pos=hand_pos,
         init_yaw=hand_yaw,
         init_time=init_time,
-        norm_reactive_force=norm_reactive_force,
-        max_force=args.max_force,
+        norm_reactive_force=norm_reactive_force
     )
 
-    robot_positions = []
-    state_log       = []
-    action_log      = []
-    success         = False
+    robot_positions, state_log, action_log = [], [], []
+    success = False
 
+    path_len = float(np.sum(np.linalg.norm(np.diff(path_points[:, :2], axis=0), axis=1)))
     print(f"\n[push] Starting policy loop — max {args.max_steps} steps")
-    print(f"[push] Path: {len(path_points)} waypoints, "
-          f"length ≈ {np.sum(np.linalg.norm(np.diff(path_points[:, :2], axis=0), axis=1)):.2f}m")
+    print(f"[push] Path: {len(path_points)} waypoints, length ≈ {path_len:.2f}m")
     print(f"[push] norm_reactive_force = {norm_reactive_force:.3f}")
 
     start_time = time.time()
 
     for step in range(args.max_steps):
 
-        # --- 1. Observe current EEF pose ---
+        # 1. Observe
         hand_pos, hand_yaw = get_eef_pose(spot)
         current_time = time.time()
-
-        # Record EEF position for logging and plotting
         robot_positions.append((hand_pos[0], hand_pos[1], hand_yaw))
 
-        # --- 2. Compute 6D state ---
-        # StateEstimator owns closest_idx internally; we read it back for
-        # progress / termination checking below.
+        # 2. Compute state
         state = estimator.compute(hand_pos, hand_yaw, current_time, path_points)
         state_log.append(state.copy())
 
-        # --- 3. Check termination conditions ---
+        # 3. Check termination
         progress, deviation, _ = compute_progress(hand_pos, path_points)
 
-        # Abort: EEF has drifted too far from path (equivalent to sim wandered_off)
         if deviation > DEVIATION_TOLERANCE:
-            print(f"[push] ABORT at step {step+1}: "
-                  f"deviation={deviation:.3f}m > tolerance={DEVIATION_TOLERANCE:.3f}m")
+            print(f"[push] ABORT step {step+1}: deviation={deviation:.3f}m > {DEVIATION_TOLERANCE:.3f}m")
             break
 
-        # Success: reached end of path while staying on it
         if progress >= SUCCESS_PROGRESS and deviation < args.success_distance:
-            print(f"[push] SUCCESS at step {step+1}: "
-                  f"progress={progress:.3f}, deviation={deviation:.3f}m")
+            print(f"[push] SUCCESS step {step+1}: progress={progress:.3f}, deviation={deviation:.3f}m")
             success = True
             break
 
-        # --- 4. Query policy ---
-        action = policy.select_action(state)
-        if action.ndim > 1:
-            action = action.flatten()
-        # Clip to [-1, 1] — policy should already output in this range,
-        # but clip defensively to guard against numerical edge cases.
+        # 4. Query policy
+        # policy.select_action returns shape (1, 3) — flatten to (3,)
+        action = policy.select_action(state).flatten()
         action = np.clip(action, -1.0, 1.0)
         action_log.append(action.copy())
 
-        # --- 5. Scale action to physical displacements ---
-        # The policy outputs a normalised 3D wrench [ax, ay, a_tau] in [-1, 1].
-        # We apply the admittance mapping:
-        #   dx    = ax    * action_scale   (metres, robot forward/back)
-        #   dy    = ay    * action_scale   (metres, robot left/right)
-        #   d_yaw = a_tau * yaw_scale      (radians, rotation)
-        #
-        # action_scale / yaw_scale are the admittance gains K.
-        # These must be tuned experimentally to match the quasi-static
-        # assumption used in simulation. Start small and increase.
+        # 5. Scale to physical displacements
         dx    = float(action[0]) * args.action_scale
         dy    = float(action[1]) * args.action_scale
         d_yaw = float(action[2]) * args.yaw_scale
 
-        # Velocity limits — divide displacement by step duration to get speed.
-        # Add a small floor to avoid divide-by-zero on very small displacements.
         vx    = max(abs(dx)    / STEP_DURATION_S, 0.01)
         vy    = max(abs(dy)    / STEP_DURATION_S, 0.01)
         v_yaw = max(abs(d_yaw) / STEP_DURATION_S, 0.01)
 
-        print(f"[push] Step {step+1:3d} | "
-              f"progress={progress:.3f} dev={deviation:.3f}m | "
-              f"state=[{state[0]:+.3f},{state[1]:+.3f},{state[2]:+.3f},"
+        print(f"[push] Step {step+1:3d} | prog={progress:.3f} dev={deviation:.3f}m | "
+              f"s=[{state[0]:+.3f},{state[1]:+.3f},{state[2]:+.3f},"
               f"{state[3]:+.3f},{state[4]:+.3f},{state[5]:.3f}] | "
-              f"action=[{action[0]:+.3f},{action[1]:+.3f},{action[2]:+.3f}]")
+              f"a=[{action[0]:+.3f},{action[1]:+.3f},{action[2]:+.3f}]")
 
-        # --- 6. Execute action on robot ---
-        # push_object_from_sim() internally transforms the sim-frame deltas
-        # into the vision frame using the robot's current pose, then calls
-        # push_object_vf() which issues a synchro_se2_trajectory command.
+        # 6. Execute
         spot.push_object_from_sim(
-            dx=dx,
-            dy=dy,
-            d_yaw=d_yaw,
-            vx=vx,
-            vy=vy,
-            v_yaw=v_yaw,
+            dx=dx, dy=dy, d_yaw=d_yaw,
+            vx=vx, vy=vy, v_yaw=v_yaw,
             dt=STEP_DURATION_S,
         )
 
     duration_s = time.time() - start_time
-    print(f"\n[push] Loop finished — {len(robot_positions)} steps, "
+    print(f"\n[push] Loop done — {len(robot_positions)} steps, "
           f"{duration_s:.1f}s, success={success}")
 
     return success, robot_positions, state_log, action_log, duration_s
@@ -417,18 +353,11 @@ def run_push(spot, policy, path_points, saved_yaw,
 # ---------------------------------------------------------------------------
 
 def push_main(args):
-    """
-    Full push pipeline:
-        init → grasp → probe → path → policy loop → release → dock
-    """
-
-    # --- Build run directory ---
-    timestamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name     = f"push_{args.path_type}_{timestamp}"
-    run_dir      = os.path.join("experiment_logs", run_name)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name  = f"push_{args.path_type}_{timestamp}"
+    run_dir   = os.path.join("experiment_logs", run_name)
     os.makedirs(run_dir, exist_ok=True)
 
-    # --- Initialise robot ---
     spot = Spot(id="Pusher", hostname=args.hostname)
     spot.start()
 
@@ -439,12 +368,11 @@ def push_main(args):
             spot.stand_up()
             spot.open_gripper()
 
-            # Save yaw BEFORE any arm movement — used for path frame transform
             saved_yaw = spot.save_initial_yaw()
 
-            # -----------------------------------------------------------
-            # Step 1: Detect and grasp
-            # -----------------------------------------------------------
+            # ----------------------------------------------------------
+            # Step 1: Grasp
+            # ----------------------------------------------------------
             print("\n[push] === STEP 1: Grasp ===")
             color_img, depth_img = spot.take_picture(
                 color_src=args.image_source,
@@ -452,18 +380,17 @@ def push_main(args):
                 save_images=True,
             )
             if color_img is None:
-                raise RuntimeError("Failed to capture image for grasp detection.")
+                raise RuntimeError("Failed to capture image.")
 
             if args.autonomous_detection:
-                print("[push] Autonomous edge detection...")
+                print("[push] Autonomous edge detection (SAM)...")
                 target_pixel = SpotPerception.find_grasp_sam(
                     color_img, depth_img,
                     left=(args.robot_side == "left"),
-                    conf=0.15,
-                    max_distance_m=3.0,
+                    conf=0.15, max_distance_m=3.0,
                 )
                 if target_pixel is None:
-                    print("[push] Autonomous detection failed, falling back to manual.")
+                    print("[push] Autonomous detection failed — falling back to manual.")
                     target_pixel = SpotPerception.get_target_from_user(color_img)
             else:
                 print("[push] Manual grasp point selection — click on the box edge.")
@@ -472,49 +399,60 @@ def push_main(args):
             if target_pixel is None:
                 raise RuntimeError("No grasp target selected.")
 
-            print(f"[push] Grasping at pixel {target_pixel}...")
             spot.open_gripper()
             if not spot.grasp_edge(target_pixel, img_src=args.image_source):
                 raise RuntimeError("Grasp command failed.")
             if not spot.check_grip():
                 raise RuntimeError("Grip check failed — object not held.")
 
-            print("[push] Grasp confirmed. Settling for 2s...")
+            print("[push] Grasp confirmed. Settling 2s...")
             time.sleep(2.0)
 
-            # -----------------------------------------------------------
-            # Step 2: Estimate reactive force
-            # -----------------------------------------------------------
+            # Capture push direction yaw HERE — robot is in correct position
+            _, _, push_yaw = spot.get_current_pose()
+            print(f"[push] Push yaw captured: {push_yaw:.3f} rad")
+
+            # ----------------------------------------------------------
+            # Step 2: Reactive force estimation
+            # ----------------------------------------------------------
             print("\n[push] === STEP 2: Reactive Force Estimation ===")
-            prober = ForceProber(max_force=args.max_force)
+            prober = ForceProber()
+            spot.open_gripper()  # Ensure gripper is open for probing
 
             if args.probe_force:
-                # Active probing — small EEF displacements to find breakaway
                 norm_rf = prober.probe(
                     spot,
                     grasp_strategy="edge_grasp",
                     surface_type=args.surface_type,
+                    robot_side=args.robot_side,
                 )
             else:
-                # Use calibrated default — safe starting point
-                norm_rf = prober.default(
+                norm_rf = prober._use_default(
                     grasp_strategy="edge_grasp",
                     surface_type=args.surface_type,
                 )
 
-            # -----------------------------------------------------------
-            # Step 3: Define path
-            # -----------------------------------------------------------
-            print("\n[push] === STEP 3: Path Definition ===")
+            print(f"[push] norm_reactive_force = {norm_rf:.3f}")
 
-            # Get current EEF pose as path origin
+            # Re-grasp after probing
+            # Close gripper to re-establish grasp
+            spot.close_gripper()
+            time.sleep(1.0)
+
+            # print("[push] Returning to saved yaw before path definition...")
+            # spot.return_to_saved_yaw(saved_yaw)
+            # time.sleep(1.0)
+
+            # ----------------------------------------------------------
+            # Step 3: Path definition
+            # ----------------------------------------------------------
+            print("\n[push] === STEP 3: Path Definition ===")
             hand_pos, hand_yaw = get_eef_pose(spot)
 
-            # PathGenerator takes saved_yaw (robot body yaw at start, used
-            # for the local→vision frame rotation) and the EEF position as
-            # the path origin. All path types start at the EEF contact point.
+            # _, _, body_yaw = spot.get_current_pose()  # body yaw in vision frame
+
             gen = PathGenerator(
-                saved_yaw=saved_yaw,
+                saved_yaw=push_yaw,  # Align path with push direction
                 origin_xy=hand_pos[:2],
                 z_height=hand_pos[2],
             )
@@ -533,116 +471,77 @@ def push_main(args):
                     num_points=max(10, int(args.length * 20)),
                 )
             elif path_type == "s_curve":
-                path_points = gen.s_curve(
-                    length=args.length,
-                    amplitude=args.amplitude,
-                )
+                path_points = gen.s_curve(length=args.length, amplitude=args.amplitude)
             elif path_type == "meander":
-                path_points = gen.meander(
-                    length=args.length,
-                    amplitude=args.amplitude,
-                )
+                path_points = gen.meander(length=args.length, amplitude=args.amplitude)
             elif path_type == "triple_s":
-                path_points = gen.triple_s(
-                    length=args.length,
-                    amplitude=args.amplitude,
-                )
+                path_points = gen.triple_s(length=args.length, amplitude=args.amplitude)
             else:
-                raise ValueError(f"Unknown path type: {args.path_type}. "
-                                 f"Choose from: arc, straight, s_curve, meander, triple_s")
+                raise ValueError(f"Unknown path type: {args.path_type}")
 
-            print(f"[push] Path: type={path_type}, {len(path_points)} points, "
-                  f"length≈{np.sum(np.linalg.norm(np.diff(path_points[:, :2], axis=0), axis=1)):.2f}m")
+            path_len = float(np.sum(np.linalg.norm(np.diff(path_points[:, :2], axis=0), axis=1)))
+            print(f"[push] Path: {path_type}, {len(path_points)} pts, length ≈ {path_len:.2f}m")
 
-            # -----------------------------------------------------------
+            # ----------------------------------------------------------
             # Step 4: Load policy
-            # -----------------------------------------------------------
+            # ----------------------------------------------------------
             print("\n[push] === STEP 4: Loading Policy ===")
-            policy_manager = PolicyManager()
-            policy = policy_manager.load_path_following_policy(
-                args.policy_path, args.model_name
+            policy = load_policy(
+                model_dir=args.model_dir,
+                model_name=args.model_name,
+                max_action=1.0,
+                max_torque=1.0,
             )
-            print(f"[push] Policy loaded: {args.policy_path}/{args.model_name}")
 
-            # -----------------------------------------------------------
-            # Step 5: Execute push
-            # -----------------------------------------------------------
+            # ----------------------------------------------------------
+            # Step 5: Push execution
+            # ----------------------------------------------------------
             print("\n[push] === STEP 5: Push Execution ===")
             success, robot_positions, state_log, action_log, duration_s = run_push(
                 spot=spot,
                 policy=policy,
                 path_points=path_points,
-                saved_yaw=saved_yaw,
                 norm_reactive_force=norm_rf,
                 args=args,
             )
 
-            # -----------------------------------------------------------
+            # ----------------------------------------------------------
             # Step 6: Release and dock
-            # -----------------------------------------------------------
+            # ----------------------------------------------------------
             print("\n[push] === STEP 6: Release and Dock ===")
             spot.open_gripper()
             time.sleep(1.0)
             spot.stow_arm()
             spot.dock(dock_id=args.dock_id)
 
-            # -----------------------------------------------------------
-            # Save data and plots
-            # -----------------------------------------------------------
-            config = {
-                "hostname":            args.hostname,
-                "path_type":           args.path_type,
-                "arc_radius":          args.arc_radius,
-                "arc_angle":           args.arc_angle,
-                "length":              args.length,
-                "amplitude":           args.amplitude,
-                "max_steps":           args.max_steps,
-                "action_scale":        args.action_scale,
-                "yaw_scale":           args.yaw_scale,
-                "max_force":           args.max_force,
-                "success_distance":    args.success_distance,
-                "probe_force":         args.probe_force,
-                "surface_type":        args.surface_type,
-                "norm_reactive_force": float(norm_rf),
-                "policy_path":         args.policy_path,
-                "model_name":          args.model_name,
-                "autonomous_detection":args.autonomous_detection,
-                "robot_side":          args.robot_side,
-            }
+            # Save
+            config = vars(args)
+            config["norm_reactive_force"] = float(norm_rf)
             save_run_data(run_dir, config, robot_positions, path_points,
                           state_log, action_log, duration_s, success)
             save_plots(robot_positions, path_points, run_dir, run_name)
 
-            status = "SUCCESS" if success else "FAILED"
-            print(f"\n[push] === {status} ===")
+            print(f"\n[push] === {'SUCCESS' if success else 'FAILED'} ===")
             return success
 
         except KeyboardInterrupt:
-            print("\n[push] Interrupted by user — releasing and docking...")
+            print("\n[push] Interrupted — shutting down safely...")
             _safe_shutdown(spot, args.dock_id)
             return False
 
         except Exception as e:
-            print(f"\n[push] Error: {e} — releasing and docking...")
+            print(f"\n[push] Error: {e}")
             _safe_shutdown(spot, args.dock_id)
             raise
 
 
 def _safe_shutdown(spot, dock_id):
-    """Best-effort release + stow + dock on error or interrupt."""
-    try:
-        spot.open_gripper()
-        time.sleep(0.5)
-    except Exception:
-        pass
-    try:
-        spot.stow_arm()
-    except Exception:
-        pass
-    try:
-        spot.dock(dock_id=dock_id)
-    except Exception:
-        pass
+    for fn in [spot.open_gripper, spot.stow_arm, lambda: spot.dock(dock_id=dock_id)]:
+        try:
+            fn()
+            time.sleep(0.5)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -655,61 +554,43 @@ def main():
     )
 
     # Connection
-    parser.add_argument("--hostname",  required=True,
-                        help="Spot robot IP or hostname")
-    parser.add_argument("--dock-id",   type=int, default=521,
-                        help="Docking station ID (default: 521)")
+    parser.add_argument("--hostname",  required=True)
+    parser.add_argument("--dock-id",   type=int, default=521)
 
     # Perception
-    parser.add_argument("--image-source",  default="hand_color_image",
-                        help="Color camera source")
-    parser.add_argument("--depth-source",  default="hand_depth_in_hand_color_frame",
-                        help="Depth camera source")
-    parser.add_argument("--autonomous-detection", action="store_true",
-                        help="Use OWL-v2 + SAM for autonomous box detection")
-    parser.add_argument("--robot-side",    choices=["left", "right"], default="right",
-                        help="Which side of the box to grasp (default: right)")
+    parser.add_argument("--image-source",  default="hand_color_image")
+    parser.add_argument("--depth-source",  default="hand_depth_in_hand_color_frame")
+    parser.add_argument("--autonomous-detection", action="store_true")
+    parser.add_argument("--robot-side", choices=["left", "right"], default="right")
 
     # Path
     parser.add_argument("--path-type",
                         choices=["arc", "straight", "s_curve", "meander", "triple_s"],
-                        default="arc",
-                        help="Path shape to follow (default: arc)")
-    parser.add_argument("--arc-radius",  type=float, default=1.5,
-                        help="Arc radius in metres (arc only, default: 1.5)")
-    parser.add_argument("--arc-angle",   type=float, default=60.0,
-                        help="Arc sweep angle in degrees (arc only, default: 60)")
-    parser.add_argument("--length",      type=float, default=3.0,
-                        help="Path forward length in metres (non-arc paths, default: 3.0)")
-    parser.add_argument("--amplitude",   type=float, default=0.5,
-                        help="Lateral amplitude in metres (s_curve/meander/triple_s, default: 0.5)")
+                        default="arc")
+    parser.add_argument("--arc-radius",  type=float, default=1.5)
+    parser.add_argument("--arc-angle",   type=float, default=60.0)
+    parser.add_argument("--length",      type=float, default=3.0)
+    parser.add_argument("--amplitude",   type=float, default=0.5)
 
-    # Policy
-    parser.add_argument("--policy-path",  default="models/rotation",
-                        help="Directory containing trained policy weights")
-    parser.add_argument("--model-name",   default="best_model",
-                        help="Model name prefix (default: best_model)")
+    # Policy — points directly to models/react/<model_name>_actor.pth
+    parser.add_argument("--model-dir",  default="models/react",
+                        help="Directory containing TD3 weights (default: models/react)")
+    parser.add_argument("--model-name", default="final_model",
+                        help="Name prefix for saved weights, e.g. 'best' → best_actor.pth "
+                             "(default: best)")
 
     # Reactive force
     parser.add_argument("--probe-force",  action="store_true",
-                        help="Actively probe for reactive force before pushing. "
-                             "If not set, uses calibrated default.")
-    parser.add_argument("--surface-type", choices=["floor", "mat"], default="floor",
-                        help="Surface type for default reactive force lookup (default: floor)")
+                        help="Actively probe for reactive force. If not set, uses calibrated default.")
+    parser.add_argument("--surface-type", choices=["floor", "mat"], default="floor")
     parser.add_argument("--max-force",    type=float, default=400.0,
-                        help="F_max for norm_reactive_force computation (N, default: 400)")
+                        help="F_max for norm_reactive_force (N, default: 400)")
 
     # Execution
-    parser.add_argument("--max-steps",       type=int,   default=50,
-                        help="Maximum policy steps per episode (default: 50)")
-    parser.add_argument("--action-scale",    type=float, default=DEFAULT_ACTION_SCALE,
-                        help=f"Admittance gain for x/y forces → metres "
-                             f"(default: {DEFAULT_ACTION_SCALE})")
-    parser.add_argument("--yaw-scale",       type=float, default=DEFAULT_YAW_SCALE,
-                        help=f"Admittance gain for torque → radians "
-                             f"(default: {DEFAULT_YAW_SCALE})")
-    parser.add_argument("--success-distance", type=float, default=0.15,
-                        help="Max deviation from path end to declare success (m, default: 0.15)")
+    parser.add_argument("--max-steps",        type=int,   default=50)
+    parser.add_argument("--action-scale",      type=float, default=DEFAULT_ACTION_SCALE)
+    parser.add_argument("--yaw-scale",         type=float, default=DEFAULT_YAW_SCALE)
+    parser.add_argument("--success-distance",  type=float, default=0.15)
 
     args = parser.parse_args()
 
@@ -717,7 +598,7 @@ def main():
         ok = push_main(args)
         sys.exit(0 if ok else 1)
     except Exception as exc:
-        print(f"[push] Fatal error: {exc}")
+        print(f"[push] Fatal: {exc}")
         sys.exit(1)
 
 
