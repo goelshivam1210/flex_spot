@@ -9,12 +9,11 @@ env:
   angular_damping: 0.05
   goal_pos: [2.0, 0.0]
   # goal_thresh is computed dynamically at each reset as: goal_thresh_pct * segment_length
-  # e.g. 0.10 * 0.3m = 0.03m for short segments, 0.10 * ~1.57m = ~0.157m for full arc
   goal_thresh_pct: 0.10
   short_segment_length: 0.3
   spin_penalty_k: 0.1        # kept for reference; new reward uses r_eff_spin directly
   deviation_tolerance: 0.5   # lateral_error threshold for strict early termination
-  strict_terminal: false      # set true to require orientation_error < 0.2 at goal
+  strict_terminal: false     # set true to require orientation_error < 0.2 at goal
   goal_reward: 100
   box_mass: 15
   # Domain randomization ranges (sampled uniformly each episode at reset)
@@ -40,3 +39,7 @@ training:
   save_freq: 500
   train_segment_mode: "short"
   eval_freq: 25
+  eval_wide:
+    enabled: true
+    mass_range: [10.0, 40.0]
+    friction_range: [0.3, 0.7]

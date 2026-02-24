@@ -132,11 +132,12 @@ def _eval_random_arc(env, agent, num_episodes, rng):
     }
 
 
-def log_eval_to_tb(writer, results, total_steps):
+def log_eval_to_tb(writer, results, total_steps, prefix="Eval"):
     """Write all eval metrics to TensorBoard under clean namespaces."""
-    for tag, stats in [("Eval/Short", results["short"]),
-                       ("Eval/Full",  results["full"]),
-                       ("Eval/Gen",   results["gen"])]:
+    for name, stats in [("Short", results["short"]),
+                        ("Full",  results["full"]),
+                        ("Gen",   results["gen"])]:
+        tag = f"{prefix}/{name}"
         writer.add_scalar(f"{tag}/SuccessRate",  stats["success_rate"],  total_steps)
         writer.add_scalar(f"{tag}/AvgReward",    stats["avg_reward"],    total_steps)
         writer.add_scalar(f"{tag}/AvgSteps",     stats["avg_steps"],     total_steps)
@@ -144,11 +145,10 @@ def log_eval_to_tb(writer, results, total_steps):
 
         tc = stats["terminal_counts"]
         n  = max(sum(tc.values()), 1)
-        writer.add_scalar(f"{tag}/Terminal/Success",     tc.get("success",     0) / n, total_steps)
-        writer.add_scalar(f"{tag}/Terminal/WanderedOff", tc.get("wandered_off",0) / n, total_steps)
-        writer.add_scalar(f"{tag}/Terminal/OrientFail",  tc.get("orient_fail", 0) / n, total_steps)
-        writer.add_scalar(f"{tag}/Terminal/Truncated",   tc.get("truncated",   0) / n, total_steps)
-
+        writer.add_scalar(f"{tag}/Terminal/Success",     tc.get("success",      0) / n, total_steps)
+        writer.add_scalar(f"{tag}/Terminal/WanderedOff", tc.get("wandered_off", 0) / n, total_steps)
+        writer.add_scalar(f"{tag}/Terminal/OrientFail",  tc.get("orient_fail",  0) / n, total_steps)
+        writer.add_scalar(f"{tag}/Terminal/Truncated",   tc.get("truncated",    0) / n, total_steps)
 
 def main():
     parser = argparse.ArgumentParser(description="Train a TD3 agent on the Environment")
@@ -165,6 +165,11 @@ def main():
     env_cfg      = config["env"]
     agent_cfg    = config["agent"]
     training_cfg = config["training"]
+    eval_wide_cfg = training_cfg.get("eval_wide", {})
+    eval_wide_enabled = bool(eval_wide_cfg.get("enabled", False))
+    eval_wide_mass_range = eval_wide_cfg.get("mass_range", [10.0, 40.0])
+    eval_wide_friction_range = eval_wide_cfg.get("friction_range", [0.3, 0.7])
+
 
     eval_freq = int(training_cfg.get("eval_freq", args.eval_freq))
 
@@ -240,13 +245,38 @@ def main():
     test_env_gen = SimplePathFollowingEnv(**test_env_gen_cfg)
     test_env_gen.reset(seed=seed + 3)
 
-    for i, e in enumerate([env, test_env_short, test_env_full, test_env_gen]):
-        e.action_space.seed(seed + 100 + i)
-        e.observation_space.seed(seed + 200 + i)
-
     state_dim  = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     max_action = env.action_space.high[0]
+
+    if eval_wide_enabled:
+        test_env_short_wide_cfg = test_env_short_cfg.copy()
+        test_env_short_wide_cfg["mass_range"] = eval_wide_mass_range
+        test_env_short_wide_cfg["friction_range"] = eval_wide_friction_range
+        test_env_short_wide = SimplePathFollowingEnv(**test_env_short_wide_cfg)
+        test_env_short_wide.reset(seed=seed + 11)
+
+        test_env_full_wide_cfg = test_env_full_cfg.copy()
+        test_env_full_wide_cfg["mass_range"] = eval_wide_mass_range
+        test_env_full_wide_cfg["friction_range"] = eval_wide_friction_range
+        test_env_full_wide = SimplePathFollowingEnv(**test_env_full_wide_cfg)
+        test_env_full_wide.reset(seed=seed + 12)
+
+        test_env_gen_wide_cfg = test_env_gen_cfg.copy()
+        test_env_gen_wide_cfg["mass_range"] = eval_wide_mass_range
+        test_env_gen_wide_cfg["friction_range"] = eval_wide_friction_range
+        test_env_gen_wide = SimplePathFollowingEnv(**test_env_gen_wide_cfg)
+        test_env_gen_wide.reset(seed=seed + 13)
+
+
+
+    envs_to_seed = [env, test_env_short, test_env_full, test_env_gen]
+    if eval_wide_enabled:
+        envs_to_seed += [test_env_short_wide, test_env_full_wide, test_env_gen_wide]
+
+    for i, e in enumerate(envs_to_seed):
+        e.action_space.seed(seed + 100 + i)
+        e.observation_space.seed(seed + 200 + i)
 
     agent = TD3(
         lr=agent_cfg.get("lr", 3e-4),
@@ -377,26 +407,41 @@ def main():
         # --- Periodic unified evaluation ---
         if ep >= next_eval_ep:
             print(f"\n--- Eval at ep {ep} (total_steps={total_steps}) ---")
-            eval_results = run_eval(
+
+            # In-distribution eval (uses env.mass_range / env.friction_range)
+            eval_results_id = run_eval(
                 test_env_short, test_env_full, test_env_gen,
                 agent, args.test_episodes, rng_gen
             )
-            log_eval_to_tb(writer, eval_results, total_steps)
+            log_eval_to_tb(writer, eval_results_id, total_steps, prefix="EvalID")
 
-            short_succ = eval_results["short"]["success_rate"]
-            full_succ  = eval_results["full"]["success_rate"]
-            gen_succ   = eval_results["gen"]["success_rate"]
+            short_id = eval_results_id["short"]["success_rate"]
+            full_id  = eval_results_id["full"]["success_rate"]
+            gen_id   = eval_results_id["gen"]["success_rate"]
 
-            print(f"  Short: {short_succ:.2f} | "
-                  f"Full: {full_succ:.2f} | "
-                  f"Gen: {gen_succ:.2f}")
+            print(f"  ID   | Short: {short_id:.2f} | Full: {full_id:.2f} | Gen: {gen_id:.2f}")
 
-            # Save best full-arc model
-            composite = 0.5 * full_succ + 0.5 * gen_succ
+            # Wide-range eval (same evals, wider mass/friction)
+            if eval_wide_enabled:
+                eval_results_wide = run_eval(
+                    test_env_short_wide, test_env_full_wide, test_env_gen_wide,
+                    agent, args.test_episodes, rng_gen
+                )
+                log_eval_to_tb(writer, eval_results_wide, total_steps, prefix="EvalWide")
+
+                short_w = eval_results_wide["short"]["success_rate"]
+                full_w  = eval_results_wide["full"]["success_rate"]
+                gen_w   = eval_results_wide["gen"]["success_rate"]
+
+                print(f"  Wide | Short: {short_w:.2f} | Full: {full_w:.2f} | Gen: {gen_w:.2f}")
+
+            # Keep best-model logic unchanged for now (ID composite),
+            # or change later once you decide convergence criteria.
+            composite = 0.5 * full_id + 0.5 * gen_id
             if composite > best_composite:
                 best_composite = composite
                 agent.save(models_dir, "best_model")
-                print(f"  New best composite: {best_composite:.2f} (full={full_succ:.2f}, gen={gen_succ:.2f})")
+                print(f"  New best composite (ID): {best_composite:.2f} (full={full_id:.2f}, gen={gen_id:.2f})")
 
             next_eval_ep = ep + eval_freq
 
@@ -406,19 +451,28 @@ def main():
             print(f"  Checkpoint saved at ep {ep}")
 
     # --- Final evaluation ---
-    print("\n--- Final Evaluation ---")
-    final_results = run_eval(
+    print("\n--- Final Evaluation (ID) ---")
+    final_results_id = run_eval(
         test_env_short, test_env_full, test_env_gen,
         agent, args.test_episodes * 2, rng_gen
     )
-    log_eval_to_tb(writer, final_results, total_steps)
+    log_eval_to_tb(writer, final_results_id, total_steps, prefix="EvalID_Final")
 
-    print(f"FINAL Short: Success={final_results['short']['success_rate']:.2f}, "
-          f"Reward={final_results['short']['avg_reward']:.2f}")
-    print(f"FINAL Full:  Success={final_results['full']['success_rate']:.2f}, "
-          f"Reward={final_results['full']['avg_reward']:.2f}")
-    print(f"FINAL Gen:   Success={final_results['gen']['success_rate']:.2f}, "
-          f"AvgDev={final_results['gen']['avg_deviation']:.3f}m")
+    print(f"FINAL ID   Short: Success={final_results_id['short']['success_rate']:.2f}, Reward={final_results_id['short']['avg_reward']:.2f}")
+    print(f"FINAL ID   Full:  Success={final_results_id['full']['success_rate']:.2f}, Reward={final_results_id['full']['avg_reward']:.2f}")
+    print(f"FINAL ID   Gen:   Success={final_results_id['gen']['success_rate']:.2f}, AvgDev={final_results_id['gen']['avg_deviation']:.3f}m")
+
+    if eval_wide_enabled:
+        print("\n--- Final Evaluation (Wide) ---")
+        final_results_wide = run_eval(
+            test_env_short_wide, test_env_full_wide, test_env_gen_wide,
+            agent, args.test_episodes * 2, rng_gen
+        )
+        log_eval_to_tb(writer, final_results_wide, total_steps, prefix="EvalWide_Final")
+
+        print(f"FINAL Wide Short: Success={final_results_wide['short']['success_rate']:.2f}, Reward={final_results_wide['short']['avg_reward']:.2f}")
+        print(f"FINAL Wide Full:  Success={final_results_wide['full']['success_rate']:.2f}, Reward={final_results_wide['full']['avg_reward']:.2f}")
+        print(f"FINAL Wide Gen:   Success={final_results_wide['gen']['success_rate']:.2f}, AvgDev={final_results_wide['gen']['avg_deviation']:.3f}m")
 
     agent.save(models_dir, "final_model")
     print("Final model saved.")
@@ -427,6 +481,11 @@ def main():
     test_env_short.close()
     test_env_full.close()
     test_env_gen.close()
+    if eval_wide_enabled:
+        test_env_short_wide.close()
+        test_env_full_wide.close()
+        test_env_gen_wide.close()
+
     writer.close()
 
 
