@@ -52,6 +52,11 @@ class SimplePathFollowingEnv(gym.Env):
         self.spin_penalty_k = kwargs.get('spin_penalty_k', 0.0)
         self.deviation_tolerance = kwargs.get('deviation_tolerance', 0.15)
         self.strict_terminal = kwargs.get('strict_terminal', False)
+        self.push_from_edge = kwargs.get('push_from_edge', False)
+
+        # When push_from_edge: heading is this edge direction (box frame), force applied at opposite edge
+        self.edge_heading_local = np.array([0.465, 0.63, 0.0], dtype=np.float64)
+        self.edge_heading_local /= np.linalg.norm(self.edge_heading_local)
 
         # goal_thresh is set dynamically at reset() based on segment length
         self.goal_thresh = None
@@ -222,7 +227,12 @@ class SimplePathFollowingEnv(gym.Env):
         pos = self.data.body('box').xpos
         quat = self.data.body('box').xquat
         current_position = pos[:2]
-        orientation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz')[2]
+        if self.push_from_edge:
+            R = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_matrix()
+            edge_dir_world = R @ self.edge_heading_local
+            orientation = np.arctan2(edge_dir_world[1], edge_dir_world[0])
+        else:
+            orientation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz')[2]
 
         # Full search over all path points (only 50) for true
         # closest point. This is Markov-correct: the same physical position always
@@ -314,10 +324,20 @@ class SimplePathFollowingEnv(gym.Env):
                 [box_quat[1], box_quat[2], box_quat[3], box_quat[0]]
             ).as_matrix()
 
-            force_local = np.array([force_x, force_y, 0])
-            torque_local = np.array([0, 0, torque_z])
-            force_world = rot_matrix @ force_local
-            torque_world = rot_matrix @ torque_local
+            if self.push_from_edge:
+                box_geom_id = self.model.geom('box_geom').id
+                half_extents = self.model.geom_size[box_geom_id]
+                dist_to_face = np.dot(half_extents, np.abs(self.edge_heading_local))
+                r_local = -self.edge_heading_local * dist_to_face
+                force_local = np.array([force_x, force_y, 0.0])
+                torque_local = np.cross(r_local, force_local)
+                force_world = rot_matrix @ force_local
+                torque_world = rot_matrix @ torque_local
+            else:
+                force_local = np.array([force_x, force_y, 0])
+                torque_local = np.array([0, 0, torque_z])
+                force_world = rot_matrix @ force_local
+                torque_world = rot_matrix @ torque_local
 
             wrench_world = np.concatenate([force_world, torque_world])
             self.data.xfrc_applied[self.box_body_id] = wrench_world

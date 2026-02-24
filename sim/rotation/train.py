@@ -154,6 +154,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train a TD3 agent on the Environment")
     parser.add_argument("--seed",          type=int,  default=0,             help="Random seed")
     parser.add_argument("--config",        type=str,  default="config.yaml", help="Path to config file")
+    parser.add_argument("--push-from-edge", action="store_true", dest="push_from_edge",
+                        help="Use edge-based heading and apply force at edge")
     parser.add_argument("--render_test",   action="store_true",              help="Render during testing")
     parser.add_argument("--test_episodes", type=int,  default=25,            help="Episodes per eval")
     parser.add_argument("--eval_freq",     type=int,  default=25,            help="Eval every N episodes")
@@ -162,7 +164,9 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
-    env_cfg      = config["env"]
+    env_cfg = config["env"].copy()
+    env_cfg["push_from_edge"] = args.push_from_edge or env_cfg.get("push_from_edge", False)
+    config["env"] = env_cfg  # so saved config includes flag
     agent_cfg    = config["agent"]
     training_cfg = config["training"]
 
