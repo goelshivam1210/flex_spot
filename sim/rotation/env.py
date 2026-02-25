@@ -219,7 +219,14 @@ class SimplePathFollowingEnv(gym.Env):
         self.data.qvel[:] = 0
 
         mujoco.mj_forward(self.model, self.data)
+        # mujoco.mj_forward(self.model, self.data)
 
+        # Warm start: settle physics before policy acts
+        self.data.xfrc_applied[:] = 0
+        for _ in range(50):  # 50 * 0.0025s = 0.125 seconds of settling
+            mujoco.mj_step(self.model, self.data)
+
+        # Reset step counter and prev state AFTER settling
         self.steps = 0
         self.prev_position = np.array(start_pos[:2])
         self.prev_time = 0.0
@@ -324,8 +331,17 @@ class SimplePathFollowingEnv(gym.Env):
 
         force_x = np.clip(action[0], -1, 1) * self.max_force
         force_y = np.clip(action[1], -1, 1) * self.max_force
-        # push_from_edge: torque from r×F only; else use policy torque
         torque_z = np.clip(action[2], -1, 1) * self.max_torque if len(action) >= 3 else 0.0
+
+        # Cache push_from_edge geometry once outside the substep loop
+        if self.push_from_edge:
+            box_geom_id = self.model.geom('box_geom').id
+            half_extents = self.model.geom_size[box_geom_id]
+            corner_local = np.array([half_extents[0], half_extents[1], 0.0]) # this corresponds to far left hand side edge (opposite side of box) from the robot's perspective
+            dist_to_corner = np.linalg.norm(corner_local)
+            r_local = self.edge_heading_local * dist_to_corner
+            force_local = np.array([force_x, force_y, 0.0])
+            torque_local = np.cross(r_local, force_local)
 
         for _ in range(self.sim_steps):
             box_quat = self.data.body('box').xquat
@@ -334,17 +350,11 @@ class SimplePathFollowingEnv(gym.Env):
             ).as_matrix()
 
             if self.push_from_edge:
-                box_geom_id = self.model.geom('box_geom').id
-                half_extents = self.model.geom_size[box_geom_id]
-                dist_to_face = np.dot(half_extents, np.abs(self.edge_heading_local))
-                r_local = -self.edge_heading_local * dist_to_face
-                force_local = np.array([force_x, force_y, 0.0])
-                torque_local = np.cross(r_local, force_local)
                 force_world = rot_matrix @ force_local
                 torque_world = rot_matrix @ torque_local
             else:
-                force_local = np.array([force_x, force_y, 0])
-                torque_local = np.array([0, 0, torque_z])
+                force_local = np.array([force_x, force_y, 0.0])
+                torque_local = np.array([0.0, 0.0, torque_z])
                 force_world = rot_matrix @ force_local
                 torque_world = rot_matrix @ torque_local
 
