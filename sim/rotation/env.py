@@ -103,11 +103,19 @@ class SimplePathFollowingEnv(gym.Env):
         high = np.array([np.inf, np.pi, np.inf, np.inf, np.inf, 1.0], dtype=np.float32)
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
-        self.action_space = spaces.Box(
-            low=np.array([-1.0, -1.0, -1.0]),
-            high=np.array([1.0, 1.0, 1.0]),
-            dtype=np.float32
-        )
+        # push_from_edge: only Fx, Fy (torque from r×F); else Fx, Fy, τz
+        if self.push_from_edge:
+            self.action_space = spaces.Box(
+                low=np.array([-1.0, -1.0]),
+                high=np.array([1.0, 1.0]),
+                dtype=np.float32
+            )
+        else:
+            self.action_space = spaces.Box(
+                low=np.array([-1.0, -1.0, -1.0]),
+                high=np.array([1.0, 1.0, 1.0]),
+                dtype=np.float32
+            )
 
         self.full_path = self._generate_arc_path(self.arc_radius, self.arc_start, self.arc_end)
 
@@ -316,7 +324,8 @@ class SimplePathFollowingEnv(gym.Env):
 
         force_x = np.clip(action[0], -1, 1) * self.max_force
         force_y = np.clip(action[1], -1, 1) * self.max_force
-        torque_z = np.clip(action[2], -1, 1) * self.max_torque
+        # push_from_edge: torque from r×F only; else use policy torque
+        torque_z = np.clip(action[2], -1, 1) * self.max_torque if len(action) >= 3 else 0.0
 
         for _ in range(self.sim_steps):
             box_quat = self.data.body('box').xquat
