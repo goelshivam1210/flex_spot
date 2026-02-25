@@ -367,7 +367,7 @@ class SimplePathFollowingEnv(gym.Env):
         if lateral_error > self.deviation_tolerance:
             done = True
             terminal_event = "wandered_off"
-            terminal_adj = -50.0
+            terminal_adj = -500.0
 
         # 2. Strict Success: reached end while staying on path
         elif progress > 0.95 and deviation < self.goal_thresh:
