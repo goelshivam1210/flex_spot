@@ -6,8 +6,9 @@ Stateful 6D state estimator for real-robot path-following policy execution.
 Mirrors the state representation from the simulation environment exactly:
     s = [lateral_error, orientation_error, speed_fwd, speed_lat, angular_vel, norm_reactive_force]
 
-All quantities are derived from the end-effector (EEF) pose, which is the
-only sensor input available after contact is established.
+When grasp_strategy and box_dimensions are provided, state is computed from the
+estimated box center (matching simulation, where state uses box pose). Otherwise
+falls back to EEF (hand) pose.
 
 Date: February 2026
 """
@@ -15,6 +16,64 @@ Date: February 2026
 import math
 import numpy as np
 
+
+# ------------------------------------------------------------------
+# Box center estimation (matches interactive_perception logic)
+# ------------------------------------------------------------------
+
+def _estimate_box_center_from_grasp(
+    gripper_pos: np.ndarray,
+    box_dimensions: dict,
+    current_yaw: float,
+    robot_side: str = "right",
+) -> np.ndarray:
+    """
+    Estimate box center from gripper position for a single edge grasp.
+
+    We assume a single robot grasping one side edge of the box. The box
+    center is offset by half the width laterally and half the depth inward,
+    rotated by the current yaw. The sign of the lateral offset depends on
+    which side the robot is on.
+    """
+    gripper_pos = np.asarray(gripper_pos)
+    width = float(box_dimensions.get("width", 0.4))
+    depth = float(box_dimensions.get("depth", 0.4))
+
+    offset_width = width / 2.0
+    offset_depth = depth / 2.0
+
+    # For a left-side grasp the box center lies to the robot's right;
+    # for a right-side grasp it lies to the left.
+    if robot_side == "left":
+        point_local = np.array([offset_depth, offset_width])
+    else:
+        point_local = np.array([offset_depth, -offset_width])
+
+    c, s = math.cos(current_yaw), math.sin(current_yaw)
+    R = np.array([[c, -s], [s, c]])
+    offset_xy = R @ point_local
+    return gripper_pos + np.array([offset_xy[0], offset_xy[1], 0.0])
+
+
+def _get_reference_pos_2d(
+    hand_pos: np.ndarray,
+    hand_yaw: float,
+    grasp_strategy: str,
+    box_dimensions: dict,
+    robot_side: str,
+) -> np.ndarray:
+    """Return 2D reference position (box center or hand) for state computation."""
+    if box_dimensions is not None:
+        center = _estimate_box_center_from_grasp(
+            hand_pos, box_dimensions, hand_yaw, robot_side
+        )
+        return center[:2]
+    return np.array(hand_pos[:2], dtype=float)
+
+
+# ------------------------------------------------------------------
+# StateEstimator
+# ------------------------------------------------------------------
 
 class StateEstimator:
     """
@@ -40,6 +99,9 @@ class StateEstimator:
         init_time: float,
         norm_reactive_force: float,
         max_force: float = 400.0,
+        grasp_strategy: str = "edge_grasp",
+        box_dimensions: dict = None,
+        robot_side: str = "right",
     ):
         """
         Args:
@@ -49,17 +111,30 @@ class StateEstimator:
             norm_reactive_force: Pre-estimated μmg/F_max for this episode.
                                  Use ForceProber result or a calibrated default.
             max_force:           Maximum robot force (N). Used only for reference / logging.
+            grasp_strategy:      "edge_grasp", "handle_grasp", etc. Used when box_dimensions set.
+            box_dimensions:      {"width", "depth", "height"} in metres. If set, state is
+                                 computed from estimated box center (matches sim). If None, uses EEF.
+            robot_side:          "left" or "right" — affects box-center offset for edge grasp.
         """
         self.norm_reactive_force = float(np.clip(norm_reactive_force, 0.0, 1.0))
         self.max_force = max_force
+        self.grasp_strategy = grasp_strategy
+        self.box_dimensions = box_dimensions if box_dimensions is not None else None
+        self.robot_side = robot_side
 
-        # Previous-step state for finite-difference velocity estimation
-        self._prev_pos  = np.array(init_hand_pos[:2], dtype=float)  # 2D only
+        # Previous-step reference position (box center or EEF) for velocity estimation
+        init_ref = _get_reference_pos_2d(
+            init_hand_pos, init_yaw, grasp_strategy, box_dimensions, robot_side
+        )
+        self._prev_pos  = np.array(init_ref, dtype=float)
         self._prev_yaw  = float(init_yaw)
         self._prev_time = float(init_time)
 
         # Closest path index — updated every step, exposed for external use
         self.closest_idx = 0
+
+        # Last reference position used (box center or EEF) — for progress/deviation in push.py
+        self.reference_pos_2d = self._prev_pos.copy()
 
     # ------------------------------------------------------------------
     # Public API
@@ -77,10 +152,15 @@ class StateEstimator:
         Useful when running multiple episodes in sequence.
         """
         self.norm_reactive_force = float(np.clip(norm_reactive_force, 0.0, 1.0))
-        self._prev_pos  = np.array(init_hand_pos[:2], dtype=float)
+        init_ref = _get_reference_pos_2d(
+            init_hand_pos, init_yaw,
+            self.grasp_strategy, self.box_dimensions, self.robot_side,
+        )
+        self._prev_pos  = np.array(init_ref, dtype=float)
         self._prev_yaw  = float(init_yaw)
         self._prev_time = float(init_time)
         self.closest_idx = 0
+        self.reference_pos_2d = self._prev_pos.copy()
 
     def compute(
         self,
@@ -102,8 +182,14 @@ class StateEstimator:
         Returns:
             np.ndarray of shape (6,) with dtype float32.
         """
-        pos_2d = np.array(current_hand_pos[:2], dtype=float)
         pts_2d = np.array(path_points)[:, :2]  # drop z if present
+
+        # --- 0. Reference position: box center (if box_dimensions) else EEF ---
+        pos_2d = _get_reference_pos_2d(
+            current_hand_pos, current_yaw,
+            self.grasp_strategy, self.box_dimensions, self.robot_side,
+        )
+        self.reference_pos_2d = pos_2d.copy()
 
         # --- 1. Closest path point (full search, same as sim) ---
         dists = np.linalg.norm(pts_2d - pos_2d, axis=1)
@@ -112,11 +198,11 @@ class StateEstimator:
         # --- 2. Path tangent and normal at closest point ---
         tangent, normal = self._path_tangent_normal(pts_2d, self.closest_idx)
 
-        # --- 3. Geometric errors ---
+        # --- 3. Geometric errors (from reference = box center or EEF) ---
         lateral_error     = self._lateral_error(pos_2d, pts_2d[self.closest_idx], normal)
         orientation_error = self._orientation_error(current_yaw, tangent)
 
-        # --- 4. Velocities via finite difference over control interval ---
+        # --- 4. Velocities via finite difference (reference position) ---
         dt = current_time - self._prev_time
         if dt > 1e-6:
             vel_2d    = (pos_2d - self._prev_pos) / dt

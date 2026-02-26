@@ -39,7 +39,7 @@ pip install -r requirements_robot.txt
 
 # Set authentication (required)
 export BOSDYN_CLIENT_USERNAME=hrilab
-export BOSDYN_CLIENT_PASSWORD=hrilabrulesspotphi
+export BOSDYN_CLIENT_PASSWORD=hrilabrulesspotpsi
 ```
 
 ### Run E-Stop GUI

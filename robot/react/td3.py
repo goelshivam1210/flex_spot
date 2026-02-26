@@ -14,8 +14,8 @@ class Actor(nn.Module):
         self.l2 = nn.Linear(400, 300)
         self.dir_head = nn.Linear(300, 2)  # unit‐vector force direction
         self.mag_head = nn.Linear(300, 1)  # force magnitude in [0,1]
-        self.tau_head = nn.Linear(300, 1)  # signed torque in [−1,1]
-        
+        self.action_dim = action_dim
+        self.tau_head = nn.Linear(300, 1) if action_dim >= 3 else None  # torque only when 3D action
         self.max_action = max_action
         self.max_torque = max_torque
         
@@ -29,16 +29,12 @@ class Actor(nn.Module):
         # Force magnitude [0,1]
         magnitude = torch.sigmoid(self.mag_head(x))
 
-        # Signed torque [−1,1]
-        tau = torch.tanh(self.tau_head(x))
-
-        # Scale to actual wrench
-        force = direction * magnitude     # [Fx, Fy]
-        torque = tau                      # [τz], shape (batch,1)
-
-        # Concatenate into final action vector (batch,3)
-        action = torch.cat([force, torque], dim=1)
-        return action
+        # Scale to actual force [Fx, Fy]
+        force = direction * magnitude
+        if self.action_dim >= 3:
+            tau = torch.tanh(self.tau_head(x))
+            return torch.cat([force, tau], dim=1)
+        return force
         
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim):

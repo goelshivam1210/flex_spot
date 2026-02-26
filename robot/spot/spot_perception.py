@@ -28,8 +28,13 @@ class SpotPerception:
     def find_grasp_sam(cv_img, depth_img, left, conf=0.15, min_area_frac=0.03,
                        group_adj=False, gap_frac=0.18, pad_frac=0.1,
                        prefer_largest=True, center_bias=0.4, max_distance_m=3.0):
-        # device = "cuda" if torch.cuda.is_available() else "cpu"
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        # Prefer CUDA (NVIDIA) > MPS (Apple Silicon) > CPU. MPS uses your Mac's GPU.
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"  # Apple Silicon GPU - set PYTORCH_ENABLE_MPS_FALLBACK=1 if you see MPS errors
+        else:
+            device = "cpu"
         sam_ckpt = "./sam_vit_h_4b8939.pth"  #TODO Needs adjusting
         model_type = "vit_h"
         labels = ["cardboard box", "shipping box", "moving box", 
@@ -55,19 +60,23 @@ class SpotPerception:
             clusters = [{"indices":[i], "box": det_boxes[i], "score": float(det_scores[i]), "count":1}
                         for i in range(len(det_boxes))]
         
-        # 3) refine each cluster with SAM (box + seeded positive points)
+        # 3) Load SAM once (not per cluster) for much faster inference
+        sam = sam_model_registry[model_type](checkpoint=sam_ckpt).to(device)
+        predictor = SamPredictor(sam)
+        predictor.set_image(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
+
+        # 4) refine each cluster with SAM (box + seeded positive points)
         sam_masks, infos = [], []
         for c in clusters:
             member_boxes = det_boxes[c["indices"]]
             mask_u8, sam_score, det_iou, roi = refine_with_sam_on_cluster(
                 cv_img, c["box"], member_boxes,
-                sam_ckpt, model_type, device,
-                pad_frac=pad_frac
+                predictor, pad_frac=pad_frac
             )
             sam_masks.append(mask_u8)
             infos.append({"cluster": c, "sam_score": sam_score, "det_iou": det_iou})
 
-        # 4) choose best cluster by composite score
+        # 5) choose best cluster by composite score
         best = None
         img_center = np.array([w/2.0, h/2.0], dtype=np.float32)
         for i, (m, info) in enumerate(zip(sam_masks, infos)):
@@ -105,7 +114,7 @@ class SpotPerception:
         box_ord = order_box_points(box)
         edges = [ (tuple(box_ord[i]), tuple(box_ord[(i+1)%4])) for i in range(4) ]
 
-        # 5) save / print
+        # 6) save / print
         out_path = "img_with_sam_overlay.png"
         vis = draw_result(cv_img, mask, box_ord)
         cv2.imwrite(out_path, vis)
@@ -549,11 +558,25 @@ def draw_result(img: np.ndarray, mask: np.ndarray, box: np.ndarray) -> np.ndarra
         cv2.putText(vis, f"P{i}", (x+4,y-4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1, cv2.LINE_AA)
     return vis
 
-# ========== OWLv2 detection ==========
+# ========== OWLv2 detection (cached for speed, uses local cache only - no internet) ==========
+_owl_processor_cache = None
+_owl_model_cache = {}  # keyed by device
+
 def detect_with_owlv2(image_bgr: np.ndarray, labels: List[str], device: str, conf_thresh: float):
+    global _owl_processor_cache, _owl_model_cache
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    processor = AutoProcessor.from_pretrained("google/owlv2-base-patch16-ensemble")
-    model = AutoModelForZeroShotObjectDetection.from_pretrained("google/owlv2-base-patch16-ensemble").to(device)
+    if _owl_processor_cache is None:
+        _owl_processor_cache = AutoProcessor.from_pretrained(
+            "google/owlv2-base-patch16-ensemble",
+            local_files_only=True,  # Use cached model only - no internet required
+        )
+    processor = _owl_processor_cache
+    if device not in _owl_model_cache:
+        _owl_model_cache[device] = AutoModelForZeroShotObjectDetection.from_pretrained(
+            "google/owlv2-base-patch16-ensemble",
+            local_files_only=True,  # Use cached model only - no internet required
+        ).to(device)
+    model = _owl_model_cache[device]
 
     inputs = processor(text=labels, images=image_rgb, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -636,9 +659,10 @@ def group_adjacent_boxes(boxes: np.ndarray, scores: np.ndarray, names: List[str]
 def refine_with_sam_on_cluster(image_bgr: np.ndarray,
                                cluster_box_xyxy: np.ndarray,
                                member_boxes_xyxy: np.ndarray,
-                               sam_ckpt: str, model_type: str, device: str,
+                               predictor: SamPredictor,
                                pad_frac: float = 0.08,
                                seed_points: int = 12):
+    """Refine cluster mask using SAM. predictor must already have set_image() called."""
     H, W = image_bgr.shape[:2]
     # pad ROI
     x1,y1,x2,y2 = cluster_box_xyxy.astype(np.float32)
@@ -646,11 +670,6 @@ def refine_with_sam_on_cluster(image_bgr: np.ndarray,
     x1p = max(0, int(round(x1 - pw))); y1p = max(0, int(round(y1 - ph)))
     x2p = min(W-1, int(round(x2 + pw))); y2p = min(H-1, int(round(y2 + ph)))
     roi = np.array([x1p,y1p,x2p,y2p], dtype=np.float32)
-
-    sam = sam_model_registry[model_type](checkpoint=sam_ckpt).to(device)
-    predictor = SamPredictor(sam)
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    predictor.set_image(image_rgb)
 
     # build positive seed points inside the union of member boxes (to keep SAM on-target)
     # sample a coarse grid in ROI and keep points that fall inside any member box

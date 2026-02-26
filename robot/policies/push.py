@@ -43,12 +43,17 @@ import torch
 # Spot SDK
 from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME
 from bosdyn.client.lease import LeaseKeepAlive
+from bosdyn.client.robot_command import (
+  RobotCommandBuilder,
+  blocking_stand,
+  block_until_arm_arrives
+)
 
 # Local robot modules
 from spot.spot import Spot, SpotPerception
 
 # react/ execution layer
-from react.state_estimator import StateEstimator
+from react.state_estimator import StateEstimator, _estimate_box_center_from_grasp
 from react.path_generator  import PathGenerator
 from react.force_prober    import ForceProber
 
@@ -72,7 +77,36 @@ STEP_DURATION_S = 3.0   # seconds per control step (matches sim Δt_ctrl)
 
 # Termination thresholds
 SUCCESS_PROGRESS    = 0.95   # fraction of path completed
-DEVIATION_TOLERANCE = 0.15   # metres — abort if EEF drifts beyond this
+DEVIATION_TOLERANCE = 0.5   # metres — abort if EEF drifts beyond this
+
+
+# ---------------------------------------------------------------------------
+# Lightweight console logging helpers
+# ---------------------------------------------------------------------------
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
+def _log(msg: str) -> None:
+    print(f"[push][{_ts()}] {msg}")
+
+
+def _fmt_xy(xy, prec: int = 3) -> str:
+    return f"({float(xy[0]):+.{prec}f}, {float(xy[1]):+.{prec}f})"
+
+
+def _fmt_vec(v, prec: int = 3) -> str:
+    v = np.asarray(v).reshape(-1)
+    return "[" + ", ".join(f"{float(x):+.{prec}f}" for x in v) + "]"
+
+
+def _deg(rad: float) -> float:
+    return float(rad) * 180.0 / math.pi
+
+
+def _safe_div(num: float, den: float, default: float = 0.0) -> float:
+    return float(num / den) if abs(den) > 1e-12 else float(default)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +114,8 @@ DEVIATION_TOLERANCE = 0.15   # metres — abort if EEF drifts beyond this
 # ---------------------------------------------------------------------------
 
 def load_policy(model_dir: str, model_name: str,
-                max_action: float = 1.0, max_torque: float = 1.0) -> TD3:
+                max_action: float = 1.0, max_torque: float = 1.0,
+                action_dim: int = None) -> TD3:
     """
     Load a trained TD3 actor from models/react/<model_name>_actor.pth.
 
@@ -89,14 +124,16 @@ def load_policy(model_dir: str, model_name: str,
         model_name: Name prefix used when saving, e.g. 'best' → loads 'best_actor.pth'.
         max_action: Max force magnitude (passed to Actor constructor — must match training).
         max_torque: Max torque magnitude (passed to Actor constructor — must match training).
+        action_dim: 2 for push-from-edge (Fx, Fy only), 3 for center-push (Fx, Fy, τz). Default: ACTION_DIM.
 
     Returns:
         TD3 instance with actor loaded and set to eval mode.
     """
+    adim = action_dim if action_dim is not None else ACTION_DIM
     policy = TD3(
         lr=1e-3,              # lr irrelevant at inference — optimizer not used
         state_dim=STATE_DIM,
-        action_dim=ACTION_DIM,
+        action_dim=adim,
         max_action=max_action,
         max_torque=max_torque,
     )
@@ -274,22 +311,48 @@ def run_push(spot, policy, path_points, norm_reactive_force, args):
     hand_pos, hand_yaw = get_eef_pose(spot)
     init_time = time.time()
 
+    use_box_center = getattr(args, "use_box_center", False)
+    box_dims = None if not use_box_center else {
+        "width": args.box_width,
+        "depth": args.box_depth,
+        "height": args.box_height,
+    }
     estimator = StateEstimator(
         init_hand_pos=hand_pos,
         init_yaw=hand_yaw,
         init_time=init_time,
-        norm_reactive_force=norm_reactive_force
+        norm_reactive_force=norm_reactive_force,
+        grasp_strategy="edge_grasp",
+        box_dimensions=box_dims,
+        robot_side=getattr(args, "robot_side", "right"),
     )
 
     robot_positions, state_log, action_log = [], [], []
     success = False
 
     path_len = float(np.sum(np.linalg.norm(np.diff(path_points[:, :2], axis=0), axis=1)))
-    print(f"\n[push] Starting policy loop — max {args.max_steps} steps")
-    print(f"[push] Path: {len(path_points)} waypoints, length ≈ {path_len:.2f}m")
-    print(f"[push] norm_reactive_force = {norm_reactive_force:.3f}")
+    log_every = max(1, int(getattr(args, "log_every", 1)))
+    ref_mode = "box_center" if use_box_center else "eef"
+
+    print("")  # spacing for readability in the terminal
+    _log(f"Starting policy loop: max_steps={args.max_steps} step_dt={STEP_DURATION_S:.2f}s log_every={log_every}")
+    _log(f"Path: waypoints={len(path_points)} length≈{path_len:.2f}m start={_fmt_xy(path_points[0, :2])} end={_fmt_xy(path_points[-1, :2])}")
+    _log(
+        "Termination: "
+        f"success(progress>={SUCCESS_PROGRESS:.2f} & dev<{args.success_distance:.2f}m), "
+        f"abort(dev>{DEVIATION_TOLERANCE:.2f}m)"
+    )
+    _log(
+        f"Reference mode={ref_mode} robot_side={args.robot_side} "
+        f"push_from_edge={getattr(args, 'push_from_edge', False)} "
+        f"scales: action_scale={args.action_scale:.4f}m yaw_scale={args.yaw_scale:.4f}rad "
+        f"norm_reactive_force={float(norm_reactive_force):.3f}"
+    )
+    _log(f"Start EEF: pos={_fmt_vec(hand_pos, prec=3)} yaw={hand_yaw:+.3f}rad ({_deg(hand_yaw):+.1f}deg)")
 
     start_time = time.time()
+    prev_idx = None
+    prev_progress = None
 
     for step in range(args.max_steps):
 
@@ -302,48 +365,104 @@ def run_push(spot, policy, path_points, norm_reactive_force, args):
         state = estimator.compute(hand_pos, hand_yaw, current_time, path_points)
         state_log.append(state.copy())
 
-        # 3. Check termination
-        progress, deviation, _ = compute_progress(hand_pos, path_points)
+        # 3. Check termination (use box center for progress/deviation when box_dimensions set)
+        ref_pos = estimator.reference_pos_2d
+        progress, deviation, idx = compute_progress(
+            np.array([ref_pos[0], ref_pos[1], hand_pos[2]]), path_points
+        )
+        progress_eef, deviation_eef, idx_eef = compute_progress(hand_pos, path_points)
 
         if deviation > DEVIATION_TOLERANCE:
-            print(f"[push] ABORT step {step+1}: deviation={deviation:.3f}m > {DEVIATION_TOLERANCE:.3f}m")
+            _log(f"ABORT step {step+1}: deviation(ref)={deviation:.3f}m > {DEVIATION_TOLERANCE:.3f}m")
             break
 
         if progress >= SUCCESS_PROGRESS and deviation < args.success_distance:
-            print(f"[push] SUCCESS step {step+1}: progress={progress:.3f}, deviation={deviation:.3f}m")
+            _log(f"SUCCESS step {step+1}: progress(ref)={progress:.3f} deviation(ref)={deviation:.3f}m")
             success = True
             break
 
         # 4. Query policy
-        # policy.select_action returns shape (1, 3) — flatten to (3,)
-        action = policy.select_action(state).flatten()
-        action = np.clip(action, -1.0, 1.0)
+        # policy.select_action returns shape (1, action_dim) — flatten
+        raw_action = policy.select_action(state).flatten()
+        action = np.clip(raw_action, -1.0, 1.0)
+        clipped = bool(np.any(np.abs(raw_action) > 1.0 + 1e-6))
         action_log.append(action.copy())
 
         # 5. Scale to physical displacements
+        # Edge-push policy (2D): only Fx, Fy; d_yaw=0 (torque from r×F on robot)
         dx    = float(action[0]) * args.action_scale
         dy    = float(action[1]) * args.action_scale
-        d_yaw = float(action[2]) * args.yaw_scale
+        d_yaw = float(action[2]) * args.yaw_scale if len(action) >= 3 else 0.0
 
         vx    = max(abs(dx)    / STEP_DURATION_S, 0.01)
         vy    = max(abs(dy)    / STEP_DURATION_S, 0.01)
         v_yaw = max(abs(d_yaw) / STEP_DURATION_S, 0.01)
 
-        print(f"[push] Step {step+1:3d} | prog={progress:.3f} dev={deviation:.3f}m | "
-              f"s=[{state[0]:+.3f},{state[1]:+.3f},{state[2]:+.3f},"
-              f"{state[3]:+.3f},{state[4]:+.3f},{state[5]:.3f}] | "
-              f"a=[{action[0]:+.3f},{action[1]:+.3f},{action[2]:+.3f}]")
+        # --- Diagnostics: waypoint alignment + progress sanity ---
+        next_idx = min(idx + 1, len(path_points) - 1)
+        to_next = path_points[next_idx, :2] - np.array([ref_pos[0], ref_pos[1]])
+        move_xy = np.array([dx, dy], dtype=float)
+        align = _safe_div(
+            float(np.dot(move_xy, to_next)),
+            float(np.linalg.norm(move_xy) * np.linalg.norm(to_next)),
+            default=0.0,
+        )
+        align_deg = math.degrees(math.acos(np.clip(align, -1.0, 1.0))) if np.linalg.norm(move_xy) > 1e-9 and np.linalg.norm(to_next) > 1e-9 else 0.0
+
+        if prev_idx is not None:
+            if idx < prev_idx - 2:
+                _log(f"WARNING: closest_idx regressed {prev_idx} -> {idx} (progress {prev_progress:.3f} -> {progress:.3f})")
+        prev_idx = idx
+        prev_progress = progress
+
+        if step % log_every == 0 or step < 3:
+            _log(
+                f"step={step+1:03d}/{args.max_steps} "
+                f"idx(ref)={idx:04d}/{len(path_points)-1} prog(ref)={progress:.3f} dev(ref)={deviation:.3f}m "
+                f"| idx(eef)={idx_eef:04d} prog(eef)={progress_eef:.3f} dev(eef)={deviation_eef:.3f}m"
+            )
+            _log(
+                f"  ref_xy={_fmt_xy(ref_pos)} eef_xy={_fmt_xy(hand_pos[:2])} "
+                f"yaw={hand_yaw:+.3f}rad ({_deg(hand_yaw):+.1f}deg)"
+            )
+            _log(
+                f"  state: lat_err={state[0]:+.3f}m ori_err={state[1]:+.3f}rad({_deg(state[1]):+.1f}deg) "
+                f"v_fwd={state[2]:+.3f} v_lat={state[3]:+.3f} yaw_rate={state[4]:+.3f} rf={state[5]:.3f}"
+            )
+            _log(
+                f"  action_raw={_fmt_vec(raw_action)} action={_fmt_vec(action)}"
+                + (" (CLIPPED)" if clipped else "")
+                + f" -> dxdy={_fmt_xy(move_xy)} dyaw={d_yaw:+.3f}rad"
+            )
+            _log(
+                f"  to_next={_fmt_vec(to_next, prec=3)} align=cos={align:+.3f} (~{align_deg:.1f}deg) "
+                f"cmd_v: vx={vx:.3f} vy={vy:.3f} vyaw={v_yaw:.3f}"
+            )
 
         # 6. Execute
-        spot.push_object_from_sim(
-            dx=dx, dy=dy, d_yaw=d_yaw,
-            vx=vx, vy=vy, v_yaw=v_yaw,
-            dt=STEP_DURATION_S,
-        )
+        try:
+            spot.push_object_from_sim(
+                dx=dx, dy=dy, d_yaw=d_yaw,
+                vx=vx, vy=vy, v_yaw=v_yaw,
+                dt=STEP_DURATION_S,
+            )
+            # spot.push_object_from_sim(
+            #     dx=0.5, dy=0, d_yaw=0,
+            #     vx=0.5, vy=0, v_yaw=0,
+            #     dt=STEP_DURATION_S,
+            # )
+        except Exception as exc:
+            _log(
+                "ERROR during push_object_from_sim: "
+                f"{type(exc).__name__}: {exc} | "
+                f"dx={dx:+.3f} dy={dy:+.3f} dyaw={d_yaw:+.3f} "
+                f"vx={vx:.3f} vy={vy:.3f} vyaw={v_yaw:.3f}"
+            )
+            raise
 
     duration_s = time.time() - start_time
-    print(f"\n[push] Loop done — {len(robot_positions)} steps, "
-          f"{duration_s:.1f}s, success={success}")
+    print("")
+    _log(f"Loop done: steps={len(robot_positions)} duration={duration_s:.1f}s success={success}")
 
     return success, robot_positions, state_log, action_log, duration_s
 
@@ -367,6 +486,28 @@ def push_main(args):
             spot.power_on()
             spot.stand_up()
             spot.open_gripper()
+            #  2. Walk forward by 1 meter (no rotation)
+            # walk_distance = 1  # meters
+            # command_client = spot._client._command_client
+            # state_client = spot._client._state_client
+            # robot_state = state_client.get_robot_state()
+            # transforms = robot_state.kinematic_state.transforms_snapshot
+
+            # duration = 4.0
+            # end_time = time.time() + duration
+
+            # # Walk forward
+            # traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+            #     walk_distance, 0.0, 0.0, transforms
+            # )
+            # cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_time)
+            # time.sleep(duration)
+
+            # print("finished walking forwards")
+            # spot.unstow_arm()
+            
+
+
 
             saved_yaw = spot.save_initial_yaw()
 
@@ -410,12 +551,12 @@ def push_main(args):
 
             # Capture push direction yaw HERE — robot is in correct position
             _, _, push_yaw = spot.get_current_pose()
-            print(f"[push] Push yaw captured: {push_yaw:.3f} rad")
+            # print(f"[push] Push yaw captured: {push_yaw:.3f} rad")
 
-            # ----------------------------------------------------------
-            # Step 2: Reactive force estimation
-            # ----------------------------------------------------------
-            print("\n[push] === STEP 2: Reactive Force Estimation ===")
+            # # ----------------------------------------------------------
+            # # Step 2: Reactive force estimation
+            # # ----------------------------------------------------------
+            # print("\n[push] === STEP 2: Reactive Force Estimation ===")
             prober = ForceProber()
             spot.open_gripper()  # Ensure gripper is open for probing
 
@@ -448,21 +589,37 @@ def push_main(args):
             # ----------------------------------------------------------
             print("\n[push] === STEP 3: Path Definition ===")
             hand_pos, hand_yaw = get_eef_pose(spot)
-
-            # _, _, body_yaw = spot.get_current_pose()  # body yaw in vision frame
+            # Define path origin: default is EEF pose; optionally box center when requested.
+            if not getattr(args, "use_box_center", False):
+                origin_xy = hand_pos[:2]
+                z_height  = hand_pos[2]
+            else:
+                box_dims = {
+                    "width": args.box_width,
+                    "depth": args.box_depth,
+                    "height": args.box_height,
+                }
+                box_center = _estimate_box_center_from_grasp(
+                    gripper_pos=hand_pos,
+                    box_dimensions=box_dims,
+                    current_yaw=hand_yaw,
+                    robot_side=args.robot_side,
+                )
+                origin_xy = box_center[:2]
+                z_height  = box_center[2]
 
             gen = PathGenerator(
                 saved_yaw=push_yaw,  # Align path with push direction
-                origin_xy=hand_pos[:2],
-                z_height=hand_pos[2],
+                origin_xy=origin_xy,
+                z_height=z_height,
             )
 
             path_type = args.path_type.lower()
             if path_type == "arc":
                 path_points = gen.arc(
                     radius=args.arc_radius,
-                    start_angle=0.0,
-                    end_angle=math.radians(args.arc_angle),
+                    start_angle=math.pi,
+                    end_angle=math.pi + math.radians(args.arc_angle),
                     num_points=max(10, int(args.arc_radius * 20)),
                 )
             elif path_type == "straight":
@@ -486,11 +643,13 @@ def push_main(args):
             # Step 4: Load policy
             # ----------------------------------------------------------
             print("\n[push] === STEP 4: Loading Policy ===")
+            action_dim = 2 if getattr(args, "push_from_edge", False) else ACTION_DIM
             policy = load_policy(
                 model_dir=args.model_dir,
                 model_name=args.model_name,
                 max_action=1.0,
                 max_torque=1.0,
+                action_dim=action_dim,
             )
 
             # ----------------------------------------------------------
@@ -563,6 +722,13 @@ def main():
     parser.add_argument("--autonomous-detection", action="store_true")
     parser.add_argument("--robot-side", choices=["left", "right"], default="right")
 
+    # Box dimensions (for box-center state estimation; matches sim)
+    parser.add_argument("--use-box-center", action="store_true",
+                        help="Use box-center state/path; default is EEF pose only")
+    parser.add_argument("--box-width",   type=float, default=0.4, help="Box width (m)")
+    parser.add_argument("--box-depth",   type=float, default=0.4, help="Box depth (m)")
+    parser.add_argument("--box-height",  type=float, default=0.3, help="Box height (m)")
+
     # Path
     parser.add_argument("--path-type",
                         choices=["arc", "straight", "s_curve", "meander", "triple_s"],
@@ -578,6 +744,8 @@ def main():
     parser.add_argument("--model-name", default="final_model",
                         help="Name prefix for saved weights, e.g. 'best' → best_actor.pth "
                              "(default: best)")
+    parser.add_argument("--push-from-edge", action="store_true",
+                        help="Use 2D policy (Fx, Fy only) trained with push_from_edge")
 
     # Reactive force
     parser.add_argument("--probe-force",  action="store_true",
@@ -590,7 +758,9 @@ def main():
     parser.add_argument("--max-steps",        type=int,   default=50)
     parser.add_argument("--action-scale",      type=float, default=DEFAULT_ACTION_SCALE)
     parser.add_argument("--yaw-scale",         type=float, default=DEFAULT_YAW_SCALE)
-    parser.add_argument("--success-distance",  type=float, default=0.15)
+    parser.add_argument("--success-distance",  type=float, default=0.8)
+    parser.add_argument("--log-every",         type=int, default=1,
+                        help="Print detailed diagnostics every N policy steps (default: 1).")
 
     args = parser.parse_args()
 
