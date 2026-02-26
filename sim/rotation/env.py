@@ -127,7 +127,7 @@ class SimplePathFollowingEnv(gym.Env):
         self.sampled_friction = self.friction
         self._reverse_path = False  # set externally to force a specific traversal direction
 
-    def _generate_arc_path(self, radius=1.5, start_angle=-np.pi / 3, end_angle=np.pi / 3, num_points=50):
+    def _generate_arc_path(self, radius=1.5, start_angle= 9*(np.pi) /6, end_angle=(13*np.pi)/6, num_points=50):
         points = []
         for theta in np.linspace(start_angle, end_angle, num_points):
             x = radius * np.cos(theta)
@@ -183,8 +183,8 @@ class SimplePathFollowingEnv(gym.Env):
             # _reverse_path overrides internal randomization if set
             if self._reverse_path:
                 self.full_path = self.full_path[::-1].copy()
-            elif self.np_random.random() > 0.5:
-                self.full_path = self.full_path[::-1].copy()
+            # elif self.np_random.random() > 0.5:
+            #     self.full_path = self.full_path[::-1].copy()
 
         self._make_training_segment()
         seg_len = self._compute_segment_length()
@@ -205,12 +205,14 @@ class SimplePathFollowingEnv(gym.Env):
         self.model.geom_friction[box_geom_id][0] = self.sampled_friction
         self.model.geom_friction[floor_geom_id][0] = self.sampled_friction
 
-        start_pos = [self.path_points[0][0], self.path_points[0][1], 0.2]
+        start_pos = [self.path_points[0][0], self.path_points[0][1], 0.315]
 
-        tangent = self.path_points[1] - self.path_points[0]
-        angle = np.arctan2(tangent[1], tangent[0])
-        start_quat = Rotation.from_euler('xyz', [0, 0, angle]).as_quat()
-        start_quat /= np.linalg.norm(start_quat)
+        # tangent = self.path_points[1] - self.path_points[0]
+        # angle = np.arctan2(tangent[1], tangent[0])
+        # start_quat = Rotation.from_euler('xyz', [0, 0, angle]).as_quat()
+        # start_quat /= np.linalg.norm(start_quat)
+
+        start_quat = [0, 0, 0, 1]
 
         qpos = np.zeros(self.model.nq)
         qpos[0:3] = start_pos
@@ -322,7 +324,10 @@ class SimplePathFollowingEnv(gym.Env):
         metrics = {
             "progress": progress,
             "deviation": deviation,
-            "longitudinal_error": longitudinal_error
+            "longitudinal_error": longitudinal_error,
+            "path_normal": path_normal, # DEBUG
+            "path_tangent": path_tangent, # DEBUG
+            "lateral_error_signed": lateral_error # DEBUG
         }
         return state, metrics
 
@@ -337,7 +342,7 @@ class SimplePathFollowingEnv(gym.Env):
         if self.push_from_edge:
             box_geom_id = self.model.geom('box_geom').id
             half_extents = self.model.geom_size[box_geom_id]
-            corner_local = np.array([half_extents[0], half_extents[1], 0.0]) # this corresponds to far left hand side edge (opposite side of box) from the robot's perspective
+            corner_local = np.array([-half_extents[0], -half_extents[1], 0.0]) # this corresponds to the righthand side edge of box from the robot's perspective
             dist_to_corner = np.linalg.norm(corner_local)
             r_local = self.edge_heading_local * dist_to_corner
             force_local = np.array([force_x, force_y, 0.0])
@@ -363,6 +368,11 @@ class SimplePathFollowingEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
 
         state_after, metrics = self._get_state()
+        # DEBUG: print signed lateral error and Fy action
+    #     print(f"lateral_err_signed={metrics['lateral_error_signed']:+.4f}  "
+    #   f"Fy={action[1]:+.4f}  "
+    #   f"path_normal={metrics['path_normal']}  "
+    #   f"tangent={metrics['path_tangent']}")
 
         # Unpack metrics
         progress = metrics["progress"]
