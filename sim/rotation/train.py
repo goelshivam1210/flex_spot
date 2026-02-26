@@ -88,8 +88,11 @@ def _eval_random_arc(env, agent, num_episodes, rng):
     for _ in range(num_episodes):
         # Sample random arc geometry
         r      = rng.uniform(1.0, 2.0)
-        theta0 = rng.uniform(-np.pi / 2, 0)
-        theta1 = rng.uniform(0, np.pi / 2)
+        # theta0 = rng.uniform(-np.pi / 2, 0)
+        span = rng.uniform(-2*np.pi/6, 2*np.pi/6)
+        theta0 = 9 * np.pi / 6
+        # theta1 = rng.uniform(0, np.pi / 2)
+        theta1 = 13 * np.pi / 6 + span
 
         env.test_full_arc  = True
         env.arc_radius     = r
@@ -97,7 +100,7 @@ def _eval_random_arc(env, agent, num_episodes, rng):
         env.arc_end        = theta1
         env.segment_length = None
         # Reverse traversal direction 50% of the time — same geometry, opposite direction
-        env._reverse_path  = rng.random() > 0.5
+        env._reverse_path  = False
 
         state, _ = env.reset()
         ep_reward    = 0.0

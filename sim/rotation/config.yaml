@@ -1,6 +1,6 @@
 env:
   gui: false
-  max_force: 250.0
+  max_force: 200.0
   max_torque: 50.0
   friction: 0.5
   spinning_friction: 0.5
@@ -18,7 +18,7 @@ env:
   goal_reward: 100
   box_mass: 15
   # Domain randomization ranges (sampled uniformly each episode at reset)
-  mass_range: [15.0, 25.0]
+  mass_range: [5.0, 15.0]
   friction_range: [0.4, 0.6]
 
 agent:
@@ -41,6 +41,6 @@ training:
   train_segment_mode: "short"
   eval_freq: 25
   eval_wide:
-    enabled: true
+    enabled: false
     mass_range: [10.0, 40.0]
     friction_range: [0.3, 0.7]
