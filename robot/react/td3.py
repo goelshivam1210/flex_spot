@@ -132,8 +132,11 @@ class TD3:
             force = next_action[:, :2]
             force_norm = torch.norm(force, dim=1, keepdim=True).clamp(min=1.0)
             force = force / force_norm
-            torque = next_action[:, 2:].clamp(-1.0, 1.0)
-            next_action = torch.cat([force, torque], dim=1)
+            if next_action.shape[1] >= 3:
+                torque = next_action[:, 2:].clamp(-1.0, 1.0)
+                next_action = torch.cat([force, torque], dim=1)
+            else:
+                next_action = force
             
             # Compute target Q-value:
             target_Q1 = self.critic_1_target(next_state, next_action)

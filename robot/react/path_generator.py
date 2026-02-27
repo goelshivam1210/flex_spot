@@ -60,8 +60,8 @@ class PathGenerator:
     def arc(
         self,
         radius: float,
-        start_angle: float = math.pi,
-        end_angle: float = 4*math.pi/3,
+        start_angle: float = 3 *math.pi/2,
+        end_angle: float = 2*math.pi,
         num_points: int = 50,
     ) -> np.ndarray:
         """

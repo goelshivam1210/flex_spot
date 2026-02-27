@@ -17,7 +17,8 @@ from bosdyn.api import(
     geometry_pb2,
     image_pb2,
     manipulation_api_pb2,
-    robot_command_pb2
+    robot_command_pb2,
+    trajectory_pb2,
 )
 from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME
 from bosdyn.client.image import ImageClient
@@ -411,6 +412,184 @@ class Spot:
         cmd_id = command_client.robot_command(traj_cmd, end_time_secs=end_t)
         time.sleep(dt+1)
 
+    def push_object_impedance(
+        self,
+        dx=0, dy=0, d_yaw=0,
+        stiffness=250.0,
+        damping=30.0,
+        dt=10,
+    ):
+        """
+        Push grasped object by offsetting the arm equilibrium in body frame.
+
+        Args:
+            dx, dy: Position offset in body frame (m).
+            d_yaw: Yaw rotation of the hand (rad).
+            stiffness: Translational stiffness (N/m).
+            damping: Translational damping (Ns/m).
+            dt: Duration to hold the command (s).
+        """
+        command_client = self._client._command_client
+        snapshot = self._client._state_client.get_robot_state().kinematic_state.transforms_snapshot
+        body_T_hand = get_a_tform_b(snapshot, GRAV_ALIGNED_BODY_FRAME_NAME, "hand")
+        if body_T_hand is None:
+            raise RuntimeError("Cannot get hand pose in body frame.")
+
+        hand_T_body = body_T_hand.inverse()
+        (hand_dx, hand_dy, hand_dz) = hand_T_body.rot.transform_point(dx, dy, 0)
+        displacement = SE3Pose(hand_dx, hand_dy, hand_dz, Quat())
+        cmd = self._build_impedance_cmd(
+            GRAV_ALIGNED_BODY_FRAME_NAME, body_T_hand, displacement, stiffness, damping
+        )
+        command_client.robot_command(cmd)
+        time.sleep(dt)
+
+    def _build_impedance_cmd(self, root_frame, root_tform_task, desired_tool, stiffness, damping):
+        """Build arm impedance command.
+
+        Task frame is placed at root_tform_task relative to root_frame.
+        Stiffness axes align with the task frame (typically the hand's pose).
+
+        Args:
+            root_frame: Reference frame name (e.g. VISION_FRAME_NAME or
+                        GRAV_ALIGNED_BODY_FRAME_NAME).
+            root_tform_task: SE3Pose locating the task frame in root_frame.
+            desired_tool: SE3Pose target for the tool in the task frame.
+                          (0,0,0,identity) = hold current pose.
+            stiffness, damping: Uniform impedance gains (all 6 axes).
+        """
+        cmd = robot_command_pb2.RobotCommand()
+        imp = cmd.synchronized_command.arm_command.arm_impedance_command
+        imp.root_frame_name = root_frame
+        imp.root_tform_task.CopyFrom(root_tform_task.to_proto())
+        imp.wrist_tform_tool.CopyFrom(SE3Pose(0, 0, 0, Quat()).to_proto())
+        imp.diagonal_stiffness_matrix.CopyFrom(
+            geometry_pb2.Vector(values=[stiffness, stiffness, stiffness, stiffness, stiffness, stiffness])
+        )
+        imp.diagonal_damping_matrix.CopyFrom(
+            geometry_pb2.Vector(values=[damping, damping, damping, damping, damping, damping])
+        )
+        pt = trajectory_pb2.SE3TrajectoryPoint()
+        pt.pose.CopyFrom(desired_tool.to_proto())
+        traj = trajectory_pb2.SE3Trajectory()
+        traj.points.append(pt)
+        imp.task_tform_desired_tool.CopyFrom(traj)
+        return cmd
+
+    def _build_walk_with_arm_cmd(self, arm_cmd, snapshot, dx, dy, d_yaw, vx, vy, v_yaw):
+        """Build body walk in vision frame, combined with an arm command."""
+        vision_tform_body = get_se2_a_tform_b(snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME)
+        obstacles = spot_command_pb2.ObstacleParams(
+            disable_vision_body_obstacle_avoidance=True,
+            disable_vision_foot_obstacle_avoidance=True,
+            disable_vision_foot_constraint_avoidance=True,
+            obstacle_avoidance_padding=0.001,
+        )
+        speed_limit = SE2VelocityLimit(max_vel=SE2Velocity(
+            linear=Vec2(x=vx, y=vy), angular=v_yaw
+        ))
+        mobility_params = spot_command_pb2.MobilityParams(
+            obstacle_params=obstacles,
+            vel_limit=speed_limit,
+            locomotion_hint=spot_command_pb2.HINT_AUTO,
+        )
+        return RobotCommandBuilder.synchro_se2_trajectory_point_command(
+            goal_x=vision_tform_body.x + dx,
+            goal_y=vision_tform_body.y + dy,
+            goal_heading=vision_tform_body.angle + d_yaw,
+            frame_name=VISION_FRAME_NAME,
+            params=mobility_params,
+            build_on_command=arm_cmd,
+        )
+
+    def push_object_impedance_vf(
+        self,
+        dx=0, dy=0, d_yaw=0,
+        vx=0.5, vy=0.5, v_yaw=0.5,
+        dt=10,
+        stiffness=600.0,
+        damping=45.0,
+        two_phase=False,
+    ):
+        """
+        Push with arm impedance + body mobility. Drop-in replacement for push_object_vf.
+
+        All displacements (dx, dy, d_yaw) are in the VISION frame.
+        Vision-frame displacements are converted to the hand frame so the arm
+        moves in the vision XY plane regardless of hand orientation.
+
+        Single-phase (default):
+            Impedance root = VISION frame. Task frame at hand's current vision
+            pose. Arm target = hand + (dx,dy) in hand frame, which is a fixed
+            goal in vision space. Body walks (dx, dy, d_yaw) simultaneously.
+            Arm pushes toward goal; body catches up; arm relaxes as error drops.
+
+        Two-phase (two_phase=True):
+            Impedance root = body frame (task moves with body).
+            Phase 1: Arm extends by (dx, dy) in hand frame. Body stays.
+            Phase 2: Body walks (dx, dy, d_yaw). Arm target resets to hold,
+                     retracts as body closes gap. Repeatable for long paths.
+
+        Args:
+            dx, dy, d_yaw: Displacement in VISION frame (m, m, rad).
+            vx, vy, v_yaw: Body velocity limits.
+            dt: Total duration (s). In two-phase mode, split between phases.
+            stiffness, damping: Uniform impedance gains.
+            two_phase: If True, arm pushes first then body catches up.
+        """
+        state_client = self._client._state_client
+        command_client = self._client._command_client
+        snapshot = state_client.get_robot_state().kinematic_state.transforms_snapshot
+
+        hold = SE3Pose(0, 0, 0, Quat())
+
+        # Vision (dx, dy, 0) → hand frame so arm moves in vision XY plane.
+        hand_T_vision = get_a_tform_b(snapshot, "hand", VISION_FRAME_NAME)
+        (hx, hy, hz) = hand_T_vision.rot.transform_point(dx, dy, 0)
+        displacement = SE3Pose(hx, hy, hz, Quat())
+
+        if two_phase:
+            body_T_hand = get_a_tform_b(snapshot, GRAV_ALIGNED_BODY_FRAME_NAME, "hand")
+            if body_T_hand is None:
+                raise RuntimeError("Cannot get hand pose in body frame.")
+
+            # Phase 1: Arm extends in hand frame; body stays.
+            # Root = body frame so task frame is fixed while body is stationary.
+            arm_cmd = self._build_impedance_cmd(
+                GRAV_ALIGNED_BODY_FRAME_NAME, body_T_hand, displacement, stiffness, damping
+            )
+            command_client.robot_command(arm_cmd)
+            phase1_dt = dt * 0.6
+            time.sleep(phase1_dt)
+
+            # Phase 2: Body catches up; arm retracts to hold (origin).
+            arm_cmd = self._build_impedance_cmd(
+                GRAV_ALIGNED_BODY_FRAME_NAME, body_T_hand, hold, stiffness, damping
+            )
+            walk_cmd = self._build_walk_with_arm_cmd(
+                arm_cmd, snapshot, dx, dy, d_yaw, vx, vy, v_yaw
+            )
+            phase2_dt = dt * 0.4
+            end_t = time.time() + phase2_dt
+            command_client.robot_command(walk_cmd, end_time_secs=end_t)
+            time.sleep(phase2_dt + 1)
+        else:
+            # Single-phase: arm target is a fixed point in VISION frame.
+            # Root = vision frame so the goal doesn't drift as the body walks.
+            vision_T_hand = get_a_tform_b(snapshot, VISION_FRAME_NAME, "hand")
+            if vision_T_hand is None:
+                raise RuntimeError("Cannot get hand pose in vision frame.")
+
+            arm_cmd = self._build_impedance_cmd(
+                VISION_FRAME_NAME, vision_T_hand, displacement, stiffness, damping
+            )
+            walk_cmd = self._build_walk_with_arm_cmd(
+                arm_cmd, snapshot, dx, dy, d_yaw, vx, vy, v_yaw
+            )
+            end_t = time.time() + dt
+            command_client.robot_command(walk_cmd, end_time_secs=end_t)
+            time.sleep(dt + 1)
+
     def transform_sim_to_vision_frame(self, sim_dx, sim_dy, sim_d_yaw, initial_pose=None):
         """
         Transform simulation commands to vision frame coordinates.
@@ -514,24 +693,42 @@ class Spot:
         time.sleep(dt + 1)
         print(f"{self.id}: Push complete.")
 
-    def push_object_from_sim(self, dx=0, dy=0, d_yaw=0, vx=0.5, vy=0.5, v_yaw=0.5, dt=10, initial_pose=None):
+    def push_object_from_sim(
+        self,
+        dx=0, dy=0, d_yaw=0,
+        vx=0.5, vy=0.5, v_yaw=0.5,
+        dt=10,
+        initial_pose=None,
+        use_impedance=False,
+        stiffness=600.0,
+        damping=45.0,
+        two_phase=False,
+    ):
         """
-        Push object using simulation commands that are automatically transformed to vision frame.
-        
+        Push object using simulation commands transformed to vision frame.
+
         Args:
-            sim_dx, sim_dy, sim_d_yaw: Commands from simulation (assuming sim starts at 0,0,0)
-            vx, vy, v_yaw: Velocity limits for the movement.
-            dt: Duration of the movement in seconds.
-            initial_pose: (x, y, yaw) tuple of robot's initial pose in vision frame.
-                          If None, uses current pose as reference.
+            dx, dy, d_yaw: Commands from simulation (assuming sim starts at 0,0,0).
+            vx, vy, v_yaw: Body velocity limits.
+            dt: Duration (s).
+            initial_pose: (x, y, yaw) of robot's initial vision-frame pose.
+            use_impedance: Use arm impedance control instead of base mobility.
+            stiffness, damping: Impedance parameters (only when use_impedance=True).
+            two_phase: When use_impedance=True, arm pushes first then body catches up.
         """
-        # Transform simulation commands to vision frame
         vision_dx, vision_dy, vision_d_yaw = self.transform_sim_to_vision_frame(
             dx, dy, d_yaw, initial_pose
         )
-        
-        # Execute the push with transformed commands
-        self.push_object_vf(vision_dx, vision_dy, vision_d_yaw, vx, vy, v_yaw, dt)
+
+        if use_impedance:
+            self.push_object_impedance_vf(
+                vision_dx, vision_dy, vision_d_yaw,
+                vx, vy, v_yaw, dt,
+                stiffness=stiffness, damping=damping,
+                two_phase=two_phase,
+            )
+        else:
+            self.push_object_vf(vision_dx, vision_dy, vision_d_yaw, vx, vy, v_yaw, dt)
 
 
         # # 3. Build mobility command to walk in the desired direction
