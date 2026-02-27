@@ -25,6 +25,8 @@ Usage:
                    --length 3.0 --amplitude 0.5 --probe-force
     python push.py --hostname 192.168.1.100 --path-type arc --walk-back 0.5
 
+     python policies/push.py --hostname 192.168.1.101 --path-type arc --arc-angle 60 --max-steps 30 --action-scale 1.0 --use-impedance --impedance-stiffness 500 --probe-force --push-from-edge --autonomous-detection
+
 Date: February 2026
 """
 
@@ -391,22 +393,11 @@ def run_push(spot, policy, path_points, norm_reactive_force, args):
             break
 
         # 4. Query policy
-        # policy.select_action returns shape (1, action_dim) — flatten
         action = policy.select_action(state).flatten()
-        # action = np.clip(raw_action, -1.0, 1.0)
-        # clipped = bool(np.any(np.abs(raw_action) > 1.0 + 1e-6))
+        action = np.clip(action, -1.0, 1.0)
         action_log.append(action.copy())
-
-        # compute the local torque
-        # torque = np.cross(hand_pos[:2], action[:2])
-        # print(f"torque: {torque:.3f}")
-
-        # 5. Scale to physical displacements
-        # action[0], action[1] = normalized force [-1,1]. F = action * max_force.
-        # With impedance: displacement = F/K. With mobility: use effective K = max_force/action_scale.
-        use_imp = getattr(args, "use_impedance", False)
-        stiffness = getattr(args, "impedance_stiffness", 600.0)
-        K_eff = stiffness if use_imp else (args.max_force / args.action_scale)
+        
+        K_eff = args.stiffness if args.use_impedance else (args.max_force / args.action_scale)
         F_x = float(action[0]) * args.max_force * args.action_scale
         F_y = float(action[1]) * args.max_force * args.action_scale
         dx = F_x / K_eff
@@ -461,11 +452,6 @@ def run_push(spot, policy, path_points, norm_reactive_force, args):
                 f"  state: lat_err={state[0]:+.3f}m ori_err={state[1]:+.3f}rad({_deg(state[1]):+.1f}deg) "
                 f"v_fwd={state[2]:+.3f} v_lat={state[3]:+.3f} yaw_rate={state[4]:+.3f} rf={state[5]:.3f}"
             )
-            # _log(
-            #     f"  action_raw={_fmt_vec(raw_action)} action={_fmt_vec(action)}"
-            #     + (" (CLIPPED)" if clipped else "")
-            #     + f" -> dxdy={_fmt_xy(move_xy)} dyaw={d_yaw:+.3f}rad"
-            # )
             _log(
                 f"  to_next={_fmt_vec(to_next, prec=3)} align=cos={align:+.3f} (~{align_deg:.1f}deg) "
                 f"cmd_v: vx={vx:.3f} vy={vy:.3f} vyaw={v_yaw:.3f}"
@@ -597,7 +583,7 @@ def push_main(args):
             # # Step 2: Reactive force estimation
             # # ----------------------------------------------------------
             # print("\n[push] === STEP 2: Reactive Force Estimation ===")
-            prober = ForceProber()
+            prober = ForceProber(max_force=args.max_force)
             spot.open_gripper()  # Ensure gripper is open for probing
 
             if args.probe_force:
