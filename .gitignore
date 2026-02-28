@@ -90,3 +90,6 @@ results_2/
 *.jpeg
 
 robot/images
+robot/experiment_logs/archive
+!robot/experiment_logs/Saves/**/*.png
+!robot/experiment_logs/Saves/**/*.csv
