@@ -1,0 +1,57 @@
+Reactive force statistics (norm_reactive_force * max_force) per experiment class
+Only push_arc runs from robot/experiment_logs/Saves/<class>/push_arc_*/params.json
+======================================================================
+
+Reactive force statistics — 12pt5kg
+==================================================
+
+Reactive force = norm_reactive_force * max_force (N).
+
+  n (samples):     10
+  mean:            41.74 N
+  std:             2.20 N
+  SEM:             0.70 N
+  min:             38.21 N
+  max:             44.85 N
+  median:          41.27 N
+  Q1:              40.98 N
+  Q3:              42.11 N
+  IQR:             1.12 N
+
+Mean ± SEM and mean ± std are commonly reported.
+
+Reactive force statistics — 8pt8kg
+==================================================
+
+Reactive force = norm_reactive_force * max_force (N).
+
+  n (samples):     11
+  mean:            26.18 N
+  std:             2.07 N
+  SEM:             0.62 N
+  min:             23.11 N
+  max:             29.28 N
+  median:          25.80 N
+  Q1:              24.42 N
+  Q3:              27.74 N
+  IQR:             3.32 N
+
+Mean ± SEM and mean ± std are commonly reported.
+
+Reactive force statistics — carpet_8pt8kg
+==================================================
+
+Reactive force = norm_reactive_force * max_force (N).
+
+  n (samples):     2
+  mean:            0.00 N
+  std:             0.00 N
+  SEM:             0.00 N
+  min:             0.00 N
+  max:             0.00 N
+  median:          0.00 N
+  Q1:              0.00 N
+  Q3:              0.00 N
+  IQR:             0.00 N
+
+Mean ± SEM and mean ± std are commonly reported.

@@ -1,0 +1,17 @@
+Reactive force statistics — 12pt5kg
+==================================================
+
+Reactive force = norm_reactive_force * max_force (N).
+
+  n (samples):     10
+  mean:            41.74 N
+  std:             2.20 N
+  SEM:             0.70 N
+  min:             38.21 N
+  max:             44.85 N
+  median:          41.27 N
+  Q1:              40.98 N
+  Q3:              42.11 N
+  IQR:             1.12 N
+
+Mean ± SEM and mean ± std are commonly reported.

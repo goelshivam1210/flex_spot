@@ -1,0 +1,17 @@
+Reactive force statistics — carpet_8pt8kg
+==================================================
+
+Reactive force = norm_reactive_force * max_force (N).
+
+  n (samples):     2
+  mean:            0.00 N
+  std:             0.00 N
+  SEM:             0.00 N
+  min:             0.00 N
+  max:             0.00 N
+  median:          0.00 N
+  Q1:              0.00 N
+  Q3:              0.00 N
+  IQR:             0.00 N
+
+Mean ± SEM and mean ± std are commonly reported.
