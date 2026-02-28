@@ -123,7 +123,7 @@ class PushArgs:
     """Scale for yaw correction (rad per unit torque)."""
     success_progress: float = 0.95
     """Fraction of path completed (0–1) required for success."""
-    deviation_tolerance: float = 0.7
+    deviation_tolerance: float = 1.0
     """Abort if deviation from path (m) exceeds this tolerance."""
     success_distance: float = 0.8
     """Max deviation (m) at path end to count as success."""
@@ -131,6 +131,8 @@ class PushArgs:
     """Print detailed diagnostics every N policy steps."""
     walk_back: float = 0.0
     """Walk backwards this many metres after standing (0 = disabled)."""
+    waypoint_skip: int = 3
+    """Trajectory baseline: advance this many waypoints per step (1 = every point)."""
     settle_between_steps: bool = True
     """Between steps: hold pose with impedance and settle so gripper is against box without smashing."""
     settle_duration_s: float = 3.0
@@ -181,6 +183,7 @@ class PushArgs:
             "success_distance": self.success_distance,
             "log_every": self.log_every,
             "walk_back": self.walk_back,
+            "waypoint_skip": self.waypoint_skip,
             "settle_between_steps": self.settle_between_steps,
             "settle_duration_s": self.settle_duration_s,
             "use_impedance": self.use_impedance,
