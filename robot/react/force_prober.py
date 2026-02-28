@@ -87,6 +87,48 @@ class ForceProber:
         print(f"[ForceProber] Default: {self._last_result:.3f}")
         return self._last_result
 
+    def settle(self, spot, duration_s: float = 3.0,
+               stiffness: float = None, damping: float = None) -> None:
+        """
+        Hold current hand pose with impedance for duration_s so the gripper settles
+        against the box without smashing. Same as the pre-baseline settle in probe().
+
+        If stiffness/damping are provided they override the prober's defaults,
+        so the settle uses the same gains as the preceding push step.
+        """
+        if not _SPOT_AVAILABLE:
+            time.sleep(duration_s)
+            return
+        sc = spot._client._state_client
+        cc = spot._client._command_client
+        snap = sc.get_robot_state().kinematic_state.transforms_snapshot
+        body_T_hand = get_a_tform_b(snap, GRAV_ALIGNED_BODY_FRAME_NAME, "hand")
+        if body_T_hand is None:
+            raise RuntimeError("Cannot get hand pose for settle.")
+        k = stiffness if stiffness is not None else self.impedance_stiffness
+        d = damping if damping is not None else self.impedance_damping
+        cmd = robot_command_pb2.RobotCommand()
+        imp = cmd.synchronized_command.arm_command.arm_impedance_command
+        imp.root_frame_name = GRAV_ALIGNED_BODY_FRAME_NAME
+        imp.root_tform_task.CopyFrom(SE3Pose(0, 0, 0, Quat()).to_proto())
+        imp.wrist_tform_tool.CopyFrom(SE3Pose(0, 0, 0, Quat()).to_proto())
+        imp.diagonal_stiffness_matrix.CopyFrom(
+            geometry_pb2.Vector(values=[k, k, 500.0, 20.0, 20.0, 20.0])
+        )
+        imp.diagonal_damping_matrix.CopyFrom(
+            geometry_pb2.Vector(values=[d, d, d, 1.0, 1.0, 1.0])
+        )
+        target = SE3Pose(
+            x=body_T_hand.x, y=body_T_hand.y, z=body_T_hand.z, rot=body_T_hand.rot
+        )
+        pt = trajectory_pb2.SE3TrajectoryPoint()
+        pt.pose.CopyFrom(target.to_proto())
+        traj = trajectory_pb2.SE3Trajectory()
+        traj.points.append(pt)
+        imp.task_tform_desired_tool.CopyFrom(traj)
+        cc.robot_command(cmd)
+        time.sleep(duration_s)
+
     # ------------------------------------------------------------------
     # Impedance probe
     # ------------------------------------------------------------------

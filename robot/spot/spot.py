@@ -69,7 +69,7 @@ class Spot:
                      save_images:bool=False):
         return self._camera.take_picture(color_src, depth_src, save_images)
 
-    def stand_up(self, timeout_sec: float = 10):
+    def stand_up(self, timeout_sec: float = 20):
         """
         Power on the robot and command it to stand.
         """
@@ -448,7 +448,10 @@ class Spot:
         """Build arm impedance command.
 
         Task frame is placed at root_tform_task relative to root_frame.
-        Stiffness axes align with the task frame (typically the hand's pose).
+        Translational stiffness/damping use the caller's values for x/y and
+        a fixed 500 N/m for z (keep height). Rotational gains are kept low
+        (20 Nm/rad stiffness, 1 Nms/rad damping) to avoid the arm fighting
+        wrist orientation changes — matching the gains used by ForceProber.
 
         Args:
             root_frame: Reference frame name (e.g. VISION_FRAME_NAME or
@@ -456,7 +459,7 @@ class Spot:
             root_tform_task: SE3Pose locating the task frame in root_frame.
             desired_tool: SE3Pose target for the tool in the task frame.
                           (0,0,0,identity) = hold current pose.
-            stiffness, damping: Uniform impedance gains (all 6 axes).
+            stiffness, damping: Translational impedance gains (N/m, Ns/m).
         """
         cmd = robot_command_pb2.RobotCommand()
         imp = cmd.synchronized_command.arm_command.arm_impedance_command
@@ -464,10 +467,10 @@ class Spot:
         imp.root_tform_task.CopyFrom(root_tform_task.to_proto())
         imp.wrist_tform_tool.CopyFrom(SE3Pose(0, 0, 0, Quat()).to_proto())
         imp.diagonal_stiffness_matrix.CopyFrom(
-            geometry_pb2.Vector(values=[stiffness, stiffness, stiffness, stiffness, stiffness, stiffness])
+            geometry_pb2.Vector(values=[stiffness, stiffness, 500.0, 20.0, 20.0, 20.0])
         )
         imp.diagonal_damping_matrix.CopyFrom(
-            geometry_pb2.Vector(values=[damping, damping, damping, damping, damping, damping])
+            geometry_pb2.Vector(values=[damping, damping, damping, 1.0, 1.0, 1.0])
         )
         pt = trajectory_pb2.SE3TrajectoryPoint()
         pt.pose.CopyFrom(desired_tool.to_proto())
@@ -525,16 +528,17 @@ class Spot:
             Arm pushes toward goal; body catches up; arm relaxes as error drops.
 
         Two-phase (two_phase=True):
-            Impedance root = body frame (task moves with body).
-            Phase 1: Arm extends by (dx, dy) in hand frame. Body stays.
-            Phase 2: Body walks (dx, dy, d_yaw). Arm target resets to hold,
-                     retracts as body closes gap. Repeatable for long paths.
+            1. Arm extends by (dx, dy) via impedance. Body stays.
+            2. 0-offset impedance settle at new hand pose (1 s).
+            3. Hand frozen at its current vision-frame pose
+               (arm_pose_command_from_pose in VISION frame).
+            4. Body walks (dx, dy, d_yaw). Hand stays fixed in world space.
 
         Args:
             dx, dy, d_yaw: Displacement in VISION frame (m, m, rad).
             vx, vy, v_yaw: Body velocity limits.
             dt: Total duration (s). In two-phase mode, split between phases.
-            stiffness, damping: Uniform impedance gains.
+            stiffness, damping: Translational impedance gains.
             two_phase: If True, arm pushes first then body catches up.
         """
         state_client = self._client._state_client
@@ -553,8 +557,7 @@ class Spot:
             if body_T_hand is None:
                 raise RuntimeError("Cannot get hand pose in body frame.")
 
-            # Phase 1: Arm extends in hand frame; body stays.
-            # Root = body frame so task frame is fixed while body is stationary.
+            # 1. Arm extends via impedance; body stays.
             arm_cmd = self._build_impedance_cmd(
                 GRAV_ALIGNED_BODY_FRAME_NAME, body_T_hand, displacement, stiffness, damping
             )
@@ -562,17 +565,85 @@ class Spot:
             phase1_dt = dt * 0.6
             time.sleep(phase1_dt)
 
-            # Phase 2: Body catches up; arm retracts to hold (origin).
-            arm_cmd = self._build_impedance_cmd(
-                GRAV_ALIGNED_BODY_FRAME_NAME, body_T_hand, hold, stiffness, damping
+            # 2. 0-offset impedance settle at new hand pose.
+            snap2 = state_client.get_robot_state().kinematic_state.transforms_snapshot
+            body_T_hand2 = get_a_tform_b(snap2, GRAV_ALIGNED_BODY_FRAME_NAME, "hand")
+            settle_cmd = self._build_impedance_cmd(
+                GRAV_ALIGNED_BODY_FRAME_NAME, body_T_hand2, hold, stiffness, damping
             )
-            walk_cmd = self._build_walk_with_arm_cmd(
-                arm_cmd, snapshot, dx, dy, d_yaw, vx, vy, v_yaw
+            command_client.robot_command(settle_cmd)
+            time.sleep(1.0)
+
+            # 3. Freeze hand in world (vision) frame — same pattern as
+            #    return_to_saved_yaw: arm_pose_command_from_pose, send
+            #    standalone, block until arm arrives.
+            snap3 = state_client.get_robot_state().kinematic_state.transforms_snapshot
+            vision_T_hand3 = get_a_tform_b(snap3, VISION_FRAME_NAME, "hand")
+            if vision_T_hand3 is None:
+                raise RuntimeError("Cannot get hand pose in vision frame.")
+            freeze_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
+                vision_T_hand3.to_proto(), VISION_FRAME_NAME, seconds=2.0
             )
-            phase2_dt = dt * 0.4
+            sync_freeze = RobotCommandBuilder.build_synchro_command(freeze_cmd)
+            freeze_id = command_client.robot_command(sync_freeze)
+            block_until_arm_arrives(command_client, freeze_id, timeout_sec=3.0)
+
+            # 4. Body catches up to the hand. Hand stays frozen because
+            #    the separate body-only walk doesn't override the arm
+            #    subsystem (same as return_to_saved_yaw).
+            vision_tform_body = get_se2_a_tform_b(snap3, VISION_FRAME_NAME, BODY_FRAME_NAME)
+            body_x, body_y = vision_tform_body.x, vision_tform_body.y
+            hand_x, hand_y = float(vision_T_hand3.x), float(vision_T_hand3.y)
+            gap = math.sqrt((hand_x - body_x)**2 + (hand_y - body_y)**2)
+            target_x = body_x + 0.5 * (hand_x - body_x)
+            target_y = body_y + 0.5 * (hand_y - body_y)
+            print(f"{self.id}: Phase2 catchup — body=({body_x:.3f},{body_y:.3f}) "
+                  f"hand=({hand_x:.3f},{hand_y:.3f}) gap={gap:.3f}m "
+                  f"target=({target_x:.3f},{target_y:.3f})")
+
+            obstacles = spot_command_pb2.ObstacleParams(
+                disable_vision_body_obstacle_avoidance=True,
+                disable_vision_foot_obstacle_avoidance=True,
+                disable_vision_foot_constraint_avoidance=True,
+                obstacle_avoidance_padding=0.001,
+            )
+            catchup_speed = SE2VelocityLimit(max_vel=SE2Velocity(
+                linear=Vec2(x=0.5, y=0.5), angular=0.5
+            ))
+            mobility_params = spot_command_pb2.MobilityParams(
+                obstacle_params=obstacles,
+                vel_limit=catchup_speed,
+                locomotion_hint=spot_command_pb2.HINT_AUTO,
+            )
+            walk_cmd = RobotCommandBuilder.synchro_se2_trajectory_point_command(
+                goal_x=target_x,
+                goal_y=target_y,
+                goal_heading=vision_tform_body.angle + d_yaw,
+                frame_name=VISION_FRAME_NAME,
+                params=mobility_params,
+            )
+            phase2_dt = max(dt, 3.0)
             end_t = time.time() + phase2_dt
             command_client.robot_command(walk_cmd, end_time_secs=end_t)
-            time.sleep(phase2_dt + 1)
+            time.sleep(phase2_dt)
+
+            # 5. Return hand to where it was before the body moved,
+            #    using arm_pose_command_from_pose (the saved vision_T_hand3).
+            return_cmd = RobotCommandBuilder.arm_pose_command_from_pose(
+                vision_T_hand3.to_proto(), VISION_FRAME_NAME, seconds=2.0
+            )
+            sync_return = RobotCommandBuilder.build_synchro_command(return_cmd)
+            return_id = command_client.robot_command(sync_return)
+            block_until_arm_arrives(command_client, return_id, timeout_sec=3.0)
+
+            # 6. 0-offset impedance settle at restored hand pose.
+            snap4 = state_client.get_robot_state().kinematic_state.transforms_snapshot
+            body_T_hand4 = get_a_tform_b(snap4, GRAV_ALIGNED_BODY_FRAME_NAME, "hand")
+            settle_cmd2 = self._build_impedance_cmd(
+                GRAV_ALIGNED_BODY_FRAME_NAME, body_T_hand4, hold, stiffness, damping
+            )
+            command_client.robot_command(settle_cmd2)
+            time.sleep(1.0)
         else:
             # Single-phase: arm target is a fixed point in VISION frame.
             # Root = vision frame so the goal doesn't drift as the body walks.
