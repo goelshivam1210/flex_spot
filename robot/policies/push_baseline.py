@@ -418,6 +418,19 @@ def baseline_main(args: PushArgs):
             time.sleep(2.0)
             spot.return_to_saved_yaw(saved_yaw)
             time.sleep(1.0)
+            _log(f"Walking backwards {args.walk_back:.2f}m...")
+            command_client = spot._client._command_client
+            state_client = spot._client._state_client
+            robot_state = state_client.get_robot_state()
+            transforms = robot_state.kinematic_state.transforms_snapshot
+            duration = max(4.0, args.walk_back / 0.25)
+            end_time = time.time() + duration
+            traj_cmd = RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+                -2.5, 0.0, 0.0, transforms
+            )
+            command_client.robot_command(traj_cmd, end_time_secs=end_time)
+            time.sleep(duration)
+            _log("Finished walking backwards.")
             spot.dock(dock_id=args.dock_id)
 
             config = args.to_dict()
