@@ -16,11 +16,16 @@ robot/
 │   ├── path_following_td3.py # Path-following TD3 variant
 │   ├── policy_manager.py   # Policy loading
 │   └── interactive_perception.py  # Joint analysis & path state construction
+├── react/                   # Real-robot execution layer (see [react/README](react/README.md))
+│   ├── state_estimator.py  # 6D egocentric state (matches sim)
+│   ├── path_generator.py   # Arc, straight, S-curve, meander, triple-S paths
+│   ├── force_prober.py     # Impedance-based reactive-force estimation
+│   └── td3.py              # TD3 Actor/Critic networks and inference
 ├── policies/                # Task applications
 │   ├── button_push.py      # Button/switch manipulation
 │   ├── door_open.py        # Door opening (revolute/prismatic)
+│   ├── push.py             # Push manipulation with react/ execution layer
 │   └── push_drag.py        # Push/drag manipulation with path-following
-
 ├── models/                  # Trained neural network policies
 │   ├── prismatic/
 │   ├── revolute/
@@ -35,7 +40,7 @@ robot/
 # Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements_robot.txt
+pip install -r requirements.txt
 
 # Set authentication (required)
 export BOSDYN_CLIENT_USERNAME=hrilab
@@ -72,7 +77,28 @@ python policies/push_drag.py --hostname <ROBOT_IP> --experiment small_box_handle
 |------|---------|-------------|
 | **Button Push** | `python policies/button_push.py` | Force-controlled button/switch pressing |
 | **Door Opening** | `python policies/door_open.py` | Door manipulation with joint detection |
+| **Push** | `python policies/push.py` | Path-following push via [react/](react/README.md) execution layer |
 | **Push/Drag** | `python policies/push_drag.py` | Box pushing/dragging with path-following policies |
+
+### Push Task (react/ execution layer)
+
+The push task uses the `react/` modules for state estimation, path generation, force probing, and TD3 policy inference. See the [react/ README](react/README.md) for full details on each module.
+
+```bash
+# Arc push (default)
+python policies/push.py --hostname 192.168.1.100 --path-type arc --arc-radius 1.5 --arc-angle 60
+
+# Straight push
+python policies/push.py --hostname 192.168.1.100 --path-type straight --length 1.5
+
+# S-curve push with active force probing
+python policies/push.py --hostname 192.168.1.100 --path-type s_curve --length 3.0 --amplitude 0.5 --probe-force
+
+# Arc push with impedance control and autonomous detection
+python policies/push.py --hostname 192.168.1.101 --path-type arc --arc-angle 60 --max-steps 30 \
+    --action-scale 1.0 --use-impedance --impedance-stiffness 500 --probe-force \
+    --push-from-edge --autonomous-detection
+```
 
 ### Push/Drag Task Configurations
 
@@ -170,6 +196,7 @@ python estop_gui.py --ip <ROBOT_IP>
 ### Directory Guidelines
 - **spot/**: General robot capabilities and hardware interface
 - **flex/**: Reusable algorithms and perception
+- **react/**: Real-robot execution layer for push tasks — see [react/README](react/README.md)
 - **policies/**: Task-specific logic with user controls
 - **models/**: Trained neural network policies
 
