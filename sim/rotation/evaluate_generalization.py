@@ -142,6 +142,16 @@ def compute_rmse(deviations_list):
     return float(np.sqrt(np.mean(all_dev ** 2)))
 
 
+def compute_episode_rmse(deviations):
+    """RMSE over deviations for a single episode."""
+    if deviations is None:
+        return float("nan")
+    dev = np.asarray(deviations, dtype=float)
+    if dev.size == 0:
+        return float("nan")
+    return float(np.sqrt(np.mean(dev ** 2)))
+
+
 # ---------------------------------------------------------------------------
 # Table 2: Path adherence sweeps
 # ---------------------------------------------------------------------------
@@ -200,39 +210,74 @@ def build_env_for_table2(env_cfg, condition_name, rng, arc_radius_override=None,
 
 def run_table2(env_cfg, models_dir, model_name, episodes, max_steps, seed, rng):
     """Run Table 2: path adherence sweeps. Returns dict condition -> RMSE."""
+    rmse_by_cond, _ = run_table2_with_episode_rmses(
+        env_cfg=env_cfg,
+        models_dir=models_dir,
+        model_name=model_name,
+        episodes=episodes,
+        max_steps=max_steps,
+        seed=seed,
+        rng=rng,
+    )
+    return rmse_by_cond
+
+
+def run_table2_with_episode_rmses(env_cfg, models_dir, model_name, episodes, max_steps, seed, rng):
+    """
+    Run Table 2 and return:
+      - rmse_by_cond: RMSE across all steps in all episodes per condition
+      - episode_rmses_by_cond: per-episode RMSE list per condition (len == episodes)
+    """
     conditions = [
         "ID",
         "Mass_OOD_Low", "Mass_OOD_High",
         "Friction_OOD_Low", "Friction_OOD_High",
         "Radius_OOD_Low", "Radius_OOD_High",
     ]
-    results = {}
+    rmse_by_cond = {}
+    episode_rmses_by_cond = {}
     arc_start = env_cfg.get("arc_start", -np.pi / 3)
     arc_end = env_cfg.get("arc_end", np.pi / 3)
 
     for cond in conditions:
-        deviations_list = []
         is_radius_cond = cond.startswith("Radius_OOD")
+
+        cfg = build_env_for_table2(
+            env_cfg, cond, rng, arc_radius_override=None, max_steps=max_steps
+        )
+        env = SimplePathFollowingEnv(**cfg)
+        env._reverse_path = False
+        env.arc_start = arc_start
+        env.arc_end = arc_end
+        agent_loaded = load_agent(models_dir, model_name, env)
+
+        ep_rmses = []
+        sumsq = 0.0
+        count = 0
         for ep in range(episodes):
-            radius_override = None
             if is_radius_cond:
                 if cond == "Radius_OOD_Low":
-                    radius_override = rng.uniform(OOD_RADIUS_LOW[0], OOD_RADIUS_LOW[1])
+                    env.arc_radius = float(rng.uniform(OOD_RADIUS_LOW[0], OOD_RADIUS_LOW[1]))
                 else:
-                    radius_override = rng.uniform(OOD_RADIUS_HIGH[0], OOD_RADIUS_HIGH[1])
-            cfg = build_env_for_table2(
-                env_cfg, cond, rng, arc_radius_override=radius_override, max_steps=max_steps
-            )
-            env = SimplePathFollowingEnv(**cfg)
-            env._reverse_path = False
-            env.arc_start = arc_start
-            env.arc_end = arc_end
-            agent_loaded = load_agent(models_dir, model_name, env)
+                    env.arc_radius = float(rng.uniform(OOD_RADIUS_HIGH[0], OOD_RADIUS_HIGH[1]))
+            else:
+                env.arc_radius = float(ID_RADIUS)
+
             devs = run_rollout(env, agent_loaded, max_steps, rng, episode_seed=seed + ep)
-            deviations_list.append(devs)
-            env.close()
-        results[cond] = compute_rmse(deviations_list)
-    return results
+            ep_rmse = compute_episode_rmse(devs)
+            ep_rmses.append(ep_rmse)
+
+            if len(devs) > 0:
+                d = np.asarray(devs, dtype=float)
+                sumsq += float(np.sum(d ** 2))
+                count += int(d.size)
+
+        env.close()
+
+        rmse_by_cond[cond] = float(np.sqrt(sumsq / count)) if count > 0 else float("nan")
+        episode_rmses_by_cond[cond] = ep_rmses
+
+    return rmse_by_cond, episode_rmses_by_cond
 
 
 # ---------------------------------------------------------------------------
@@ -307,31 +352,134 @@ def run_table3_custom_path(env_cfg, models_dir, model_name, path_points, episode
 
 def run_table3(env_cfg, models_dir, model_name, episodes, max_steps, seed, rng):
     """Run Table 3: trajectory type generalization."""
-    results = {}
-    # Arc 60°, 120°, 180°
-    results["Arc_60deg"] = run_table3_arc(
+    rmse_by_cond, _ = run_table3_with_episode_rmses(
+        env_cfg=env_cfg,
+        models_dir=models_dir,
+        model_name=model_name,
+        episodes=episodes,
+        max_steps=max_steps,
+        seed=seed,
+        rng=rng,
+    )
+    return rmse_by_cond
+
+
+def run_table3_with_episode_rmses(env_cfg, models_dir, model_name, episodes, max_steps, seed, rng):
+    """
+    Run Table 3 and return:
+      - rmse_by_cond: RMSE across all steps in all episodes per condition
+      - episode_rmses_by_cond: per-episode RMSE list per condition (len == episodes)
+    """
+    rmse_by_cond = {}
+    episode_rmses_by_cond = {}
+
+    rmse_by_cond["Arc_60deg"], episode_rmses_by_cond["Arc_60deg"] = run_table3_arc_with_episode_rmses(
         env_cfg, models_dir, model_name, ARC_60_RAD, episodes, max_steps, seed, rng
     )
-    results["Arc_120deg"] = run_table3_arc(
+    rmse_by_cond["Arc_120deg"], episode_rmses_by_cond["Arc_120deg"] = run_table3_arc_with_episode_rmses(
         env_cfg, models_dir, model_name, ARC_120_RAD, episodes, max_steps, seed, rng
     )
-    results["Arc_180deg"] = run_table3_arc(
+    rmse_by_cond["Arc_180deg"], episode_rmses_by_cond["Arc_180deg"] = run_table3_arc_with_episode_rmses(
         env_cfg, models_dir, model_name, ARC_180_RAD, episodes, max_steps, seed, rng
     )
-    # S-path and Meandering
+
     if generate_s_path is not None and generate_meander_path is not None:
         s_path = generate_s_path(length=3.0, amplitude=0.5, num_points=100)
         meander_path = generate_meander_path(length=4.0, amplitude=0.4, num_points=150)
-        results["S_path"] = run_table3_custom_path(
+        rmse_by_cond["S_path"], episode_rmses_by_cond["S_path"] = run_table3_custom_path_with_episode_rmses(
             env_cfg, models_dir, model_name, s_path, episodes, max_steps, seed, rng
         )
-        results["Meandering_path"] = run_table3_custom_path(
+        rmse_by_cond["Meandering_path"], episode_rmses_by_cond["Meandering_path"] = run_table3_custom_path_with_episode_rmses(
             env_cfg, models_dir, model_name, meander_path, episodes, max_steps, seed, rng
         )
     else:
-        results["S_path"] = float("nan")
-        results["Meandering_path"] = float("nan")
-    return results
+        rmse_by_cond["S_path"] = float("nan")
+        rmse_by_cond["Meandering_path"] = float("nan")
+        episode_rmses_by_cond["S_path"] = []
+        episode_rmses_by_cond["Meandering_path"] = []
+
+    return rmse_by_cond, episode_rmses_by_cond
+
+
+def run_table3_arc_with_episode_rmses(env_cfg, models_dir, model_name, span_rad, episodes, max_steps, seed, rng):
+    """Run Table 3 arc eval and also return per-episode RMSE list."""
+    cfg = env_cfg.copy()
+    cfg["gui"] = False
+    cfg["segment_length"] = None
+    cfg["test_full_arc"] = True
+    cfg["max_steps"] = max_steps
+    cfg["mass_range"] = [ID_MASS_LO, ID_MASS_HI]
+    cfg["friction_range"] = [ID_FRICTION_LO, ID_FRICTION_HI]
+    cfg["arc_radius"] = ID_RADIUS
+    start, end = arc_start_end_for_span(span_rad)
+    cfg["arc_start"] = start
+    cfg["arc_end"] = end
+
+    env = SimplePathFollowingEnv(**cfg)
+    env._reverse_path = False
+    agent_loaded = load_agent(models_dir, model_name, env)
+
+    ep_rmses = []
+    sumsq = 0.0
+    count = 0
+    for ep in range(episodes):
+        devs = run_rollout(env, agent_loaded, max_steps, rng, episode_seed=seed + ep)
+        ep_rmse = compute_episode_rmse(devs)
+        ep_rmses.append(ep_rmse)
+        if len(devs) > 0:
+            d = np.asarray(devs, dtype=float)
+            sumsq += float(np.sum(d ** 2))
+            count += int(d.size)
+
+    env.close()
+    rmse = float(np.sqrt(sumsq / count)) if count > 0 else float("nan")
+    return rmse, ep_rmses
+
+
+def run_table3_custom_path_with_episode_rmses(env_cfg, models_dir, model_name, path_points, episodes, max_steps, seed, rng):
+    """Run Table 3 custom-path eval and also return per-episode RMSE list."""
+    if reset_env_with_path is None:
+        return float("nan"), []
+
+    cfg = env_cfg.copy()
+    cfg["gui"] = False
+    cfg["segment_length"] = None
+    cfg["test_full_arc"] = True
+    cfg["mass_range"] = [ID_MASS_LO, ID_MASS_HI]
+    cfg["friction_range"] = [ID_FRICTION_LO, ID_FRICTION_HI]
+    cfg["arc_radius"] = ID_RADIUS
+    cfg["max_steps"] = max_steps
+
+    env = SimplePathFollowingEnv(**cfg)
+    env._reverse_path = False
+    agent_loaded = load_agent(models_dir, model_name, env)
+
+    ep_rmses = []
+    sumsq = 0.0
+    count = 0
+    for ep in range(episodes):
+        state = reset_env_with_path(env, path_points, rng)
+        devs = []
+        for _ in range(max_steps):
+            action = agent_loaded.select_action(np.array(state))
+            if action.ndim > 1:
+                action = action.squeeze(0)
+            next_state, reward, done, truncated, info = env.step(action)
+            devs.append(float(info["deviation"]))
+            state = next_state
+            if done or truncated:
+                break
+
+        ep_rmse = compute_episode_rmse(devs)
+        ep_rmses.append(ep_rmse)
+        if len(devs) > 0:
+            d = np.asarray(devs, dtype=float)
+            sumsq += float(np.sum(d ** 2))
+            count += int(d.size)
+
+    env.close()
+    rmse = float(np.sqrt(sumsq / count)) if count > 0 else float("nan")
+    return rmse, ep_rmses
 
 
 # ---------------------------------------------------------------------------
