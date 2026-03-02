@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, max_action, max_torque):
@@ -86,21 +85,24 @@ class ReplayBuffer:
     
 
 class TD3:
-    def __init__(self, lr, state_dim, action_dim, max_action, max_torque, torch_rng=None):
+    def __init__(self, lr, state_dim, action_dim, max_action, max_torque, torch_rng=None, device=None):
         
-        self.torch_rng = torch_rng or torch.Generator(device='cpu').manual_seed(0)
-        self.actor = Actor(state_dim, action_dim, max_action, max_torque).to(device)
-        self.actor_target = Actor(state_dim, action_dim, max_action, max_torque).to(device)
+        # Resolve and store device (supports MPS, CUDA, or CPU)
+        self.device = device or torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        self.torch_rng = torch_rng or torch.Generator(device=self.device).manual_seed(0)
+        self.actor = Actor(state_dim, action_dim, max_action, max_torque).to(self.device)
+        self.actor_target = Actor(state_dim, action_dim, max_action, max_torque).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
         
-        self.critic_1 = Critic(state_dim, action_dim).to(device)
-        self.critic_1_target = Critic(state_dim, action_dim).to(device)
+        self.critic_1 = Critic(state_dim, action_dim).to(self.device)
+        self.critic_1_target = Critic(state_dim, action_dim).to(self.device)
         self.critic_1_target.load_state_dict(self.critic_1.state_dict())
         self.critic_1_optimizer = optim.Adam(self.critic_1.parameters(), lr=lr)
         
-        self.critic_2 = Critic(state_dim, action_dim).to(device)
-        self.critic_2_target = Critic(state_dim, action_dim).to(device)
+        self.critic_2 = Critic(state_dim, action_dim).to(self.device)
+        self.critic_2_target = Critic(state_dim, action_dim).to(self.device)
         self.critic_2_target.load_state_dict(self.critic_2.state_dict())
         self.critic_2_optimizer = optim.Adam(self.critic_2.parameters(), lr=lr)
         
@@ -108,22 +110,24 @@ class TD3:
         self.max_torque = max_torque
     
     def select_action(self, state):
-        state = torch.FloatTensor(state.reshape(1, -1)).to(device) if len(state.shape) == 1 else torch.FloatTensor(state).to(device)
-        return self.actor(state).cpu().detach().numpy()
+        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        if state_tensor.dim() == 1:
+            state_tensor = state_tensor.unsqueeze(0)
+        return self.actor(state_tensor).cpu().detach().numpy()
     
     def update(self, replay_buffer, n_iter, batch_size, gamma, polyak, policy_noise, noise_clip, policy_delay):
         
         for i in range(n_iter):
             # Sample a batch of transitions from replay buffer:
             state, action_, reward, next_state, done = replay_buffer.sample(batch_size)
-            state = torch.FloatTensor(state).to(device)
-            action = torch.FloatTensor(action_).to(device)
-            reward = torch.FloatTensor(reward).reshape((batch_size,1)).to(device)
-            next_state = torch.FloatTensor(next_state).to(device)
-            done = torch.FloatTensor(done).reshape((batch_size,1)).to(device)
+            state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+            action = torch.as_tensor(action_, dtype=torch.float32, device=self.device)
+            reward = torch.as_tensor(reward, dtype=torch.float32, device=self.device).reshape((batch_size, 1))
+            next_state = torch.as_tensor(next_state, dtype=torch.float32, device=self.device)
+            done = torch.as_tensor(done, dtype=torch.float32, device=self.device).reshape((batch_size, 1))
             
             # Select next action according to target policy:
-            noise = torch.randn(action_.shape, generator=self.torch_rng, device=device) * policy_noise
+            noise = torch.randn(action_.shape, generator=self.torch_rng, device=self.device) * policy_noise
             noise = noise.clamp(-noise_clip, noise_clip)
             # next_action = (self.actor_target(next_state) + noise)
             # next_action = next_action.clamp(-self.max_action, self.max_action)
