@@ -199,7 +199,15 @@ def main():
     rng_exploration = np.random.default_rng(seed + 20)
     rng_gen         = np.random.default_rng(seed + 30)
 
-    dev       = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # dev       = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    if torch.backends.mps.is_available():
+        dev = torch.device("mps")
+    elif torch.cuda.is_available():
+        dev = torch.device("cuda")
+    else:
+        dev = torch.device("cpu")
+
+    print("Using device:", dev)
     torch_rng = torch.Generator(device=dev).manual_seed(seed + 40)
 
     # Create timestamped run directory
@@ -291,7 +299,8 @@ def main():
         action_dim=action_dim,
         max_action=max_action,
         max_torque=env_cfg.get("max_torque", 50.0),
-        torch_rng=torch_rng
+        torch_rng=torch_rng,
+        device=dev
     )
     replay_buffer = ReplayBuffer(
         max_size=agent_cfg.get("replay_buffer_max_size", 5e5),

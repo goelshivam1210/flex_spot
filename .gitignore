@@ -93,3 +93,4 @@ robot/images
 robot/experiment_logs/archive
 !robot/experiment_logs/Saves/**/*.png
 !robot/experiment_logs/Saves/**/*.csv
+.venv_train/
