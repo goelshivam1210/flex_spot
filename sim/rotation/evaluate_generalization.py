@@ -405,8 +405,8 @@ def main():
                         help="Path to run_dir; evaluate all models in models/")
     parser.add_argument("--model", type=str, default=None,
                         help="Model name when --checkpoint is run_dir (e.g. best_model)")
-    parser.add_argument("--episodes", type=int, default=20,
-                        help="Episodes per condition (default: 20)")
+    parser.add_argument("--episodes", type=int, default=100,
+                        help="Episodes per condition (default: 100)")
     parser.add_argument("--max_steps", type=int, default=1000,
                         help="Max steps per episode (default: 1000)")
     parser.add_argument("--seed", type=int, default=42)
