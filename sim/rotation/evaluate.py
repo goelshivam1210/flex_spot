@@ -175,6 +175,9 @@ def run_condition(env, agent, output_path, max_steps, max_attempts, label,
     dist_to_corner = np.linalg.norm(corner_local)
     r_local = env.edge_heading_local * dist_to_corner if env.push_from_edge else np.zeros(3)
 
+    # Opposite corner from the push point (body frame)
+    r_other = np.array([-half_extents[0], -half_extents[1], 0.0])
+
     for attempt in range(1, max_attempts + 1):
         state, _ = env.reset()
         env._reverse_path = False
@@ -202,9 +205,11 @@ def run_condition(env, agent, output_path, max_steps, max_attempts, label,
 
             if env.push_from_edge:
                 torque_local = np.cross(r_local, force_local)
+                torque_at_other = np.cross(r_local - r_other, force_local)
             else:
                 tz_raw = float(np.clip(action[2], -1, 1)) if len(action) >= 3 else 0.0
                 torque_local = np.array([0.0, 0.0, tz_raw * env.max_torque])
+                torque_at_other = torque_local - np.cross(r_other, force_local)
 
             # Per-step action log row
             action_log.append({
@@ -214,11 +219,16 @@ def run_condition(env, agent, output_path, max_steps, max_attempts, label,
                 "fx_N":          round(fx, 3),
                 "fy_N":          round(fy, 3),
                 "force_mag_N":   round(float(np.linalg.norm(force_local[:2])), 3),
-                "r_local_x":     round(float(r_local[0]), 5),
-                "r_local_y":     round(float(r_local[1]), 5),
-                "torque_x":      round(float(torque_local[0]), 5),
-                "torque_y":      round(float(torque_local[1]), 5),
-                "torque_z":      round(float(torque_local[2]), 5),
+                # Push point (body frame)
+                "r_push_x":     round(float(r_local[0]), 5),
+                "r_push_y":     round(float(r_local[1]), 5),
+                # Equivalent torque at centroid: r_push × F  (only z nonzero in 2D)
+                "centroid_tz":   round(float(torque_local[2]), 5),
+                # Other edge reference point (body frame)
+                "r_other_x":    round(float(r_other[0]), 5),
+                "r_other_y":    round(float(r_other[1]), 5),
+                # Equivalent torque at other edge: (r_push - r_other) × F
+                "other_edge_tz": round(float(torque_at_other[2]), 5),
                 "lateral_err":   round(float(state[0]), 5),
                 "orient_err":    round(float(state[1]), 5),
                 "speed_fwd":     round(float(state[2]), 5),

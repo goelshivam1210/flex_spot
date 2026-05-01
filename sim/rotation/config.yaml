@@ -14,7 +14,7 @@ env:
   spin_penalty_k: 0.1        # kept for reference; new reward uses r_eff_spin directly
   deviation_tolerance: 0.5   # lateral_error threshold for strict early termination
   strict_terminal: false      # set true to require orientation_error < 0.2 at goal
-  push_from_edge: false      # set true or use --push-from-edge: edge heading [0.465,0.63,0], force at edge
+  push_from_edge: true       # set true or use --push-from-edge: edge heading [0.465,0.63,0], force at edge
   goal_reward: 100
   box_mass: 15
   # Domain randomization ranges (sampled uniformly each episode at reset)
